@@ -1,210 +1,160 @@
-# PeekX
+# PeekX-enhanced
 
-A native macOS Quick Look extension that provides instant previews of folder contents, including file counts, size statistics, and detailed folder analysis.
+PeekX-enhanced 是一个基于 PeekX 改造的 macOS Quick Look 扩展，用来在访达中直接预览文件夹、压缩包内容以及常见文件格式。选中文件夹、压缩包或文件后按空格即可查看，无需先打开 Finder 子窗口或解压压缩包。
 
-## 🎉 What's New in v1.1
+本版本重点增强了压缩包列表预览、Markdown 渲染预览和右侧文件预览体验。
 
-- **Markdown preview support** - View `.md` files directly in Quick Look
-- **Faster performance** - Improved folder preview speed
+## 功能
 
----
+- 文件夹内容预览：以树状列表展示文件夹内的完整目录结构。
+- 压缩包内容预览：列出压缩包内部目录和文件，不需要先解压。
+- 多格式压缩包支持：基于内置 libarchive，覆盖 zip、tar、tar.gz、tar.bz2、tar.xz、7z、rar、iso、cpio、xar、cab 等常见格式。
+- 右侧文件预览：支持 macOS Quick Look 原生可预览的图片、PDF、音频、视频、Office 文档等格式。
+- Markdown 预览：支持 `.md` / `.markdown` 文件的渲染预览。
+- 文本预览：支持常见源码、脚本、配置文件和纯文本文件。
+- 压缩包内文件预览：对可安全读取的压缩包成员，会临时提取到沙盒缓存中并尝试使用原生预览。
+- 快速选择响应：左侧列表点击后立即选中，右侧预览异步加载。
+- 横向和纵向滚动：适配长文件名、宽内容和大图预览。
 
-> **⭐ Support This Project**  
-> If you find PeekX useful, please consider starring this repository! Unlike similar apps that cost $5-10, PeekX is completely free and open source. **A star is the only payment I ask for** - it helps others discover the project and motivates continued development.
->
-> [⭐ Star this repo](https://github.com/altic-dev/PeekX) • It takes just one click!
+## 使用方式
 
----
+1. 在 Finder 中选中文件夹、压缩包或支持的文件。
+2. 按空格打开 Quick Look。
+3. 左侧浏览文件列表或压缩包目录。
+4. 点击左侧项目后，在右侧查看预览和文件信息。
 
-## Overview
+压缩包内部路径会以类似下面的形式表示：
 
-PeekX enhances the macOS Quick Look feature by allowing you to preview the contents of any folder without opening it. Simply select a folder in Finder and press Space to see a comprehensive breakdown of its contents, including file types, sizes, and structure.
+```text
+archive.zip!/path/in/archive
+```
 
-### 📺 Demo Video
+## 支持的内容
 
-[![Watch PeekX in Action](https://img.youtube.com/vi/GD9e9tEScns/maxresdefault.jpg)](https://youtu.be/GD9e9tEScns)
+### 文件夹
 
-**[▶️ Watch the demo on YouTube](https://youtu.be/GD9e9tEScns)**
+文件夹预览会显示完整目录树、文件夹数量、文件数量和总大小。界面不再按类型分类筛选，默认展示全部内容。
 
-## Features
+### 压缩包
 
-- **Instant Folder Preview** - View folder contents directly in Quick Look
-- **File Statistics** - See total file count, folder size, and file type breakdown
-- **Modern Interface** - Clean, native macOS design that matches system aesthetics
-- **Lightweight** - Minimal resource usage with fast rendering
-- **Sandboxed** - Fully sandboxed for security and privacy
-- **Universal Binary** - Supports both Apple Silicon and Intel Macs
+压缩包读取使用工程内置的 libarchive 静态库，不依赖 `/usr/bin/tar`、`zipinfo` 等外部命令。
 
-## Requirements
+已注册的常见类型包括：
 
-- macOS 14.0 (Sonoma) or later
-- Apple Silicon or Intel processor
+- ZIP
+- TAR / TAR.GZ / TAR.BZ2 / TAR.XZ
+- 7-Zip
+- RAR
+- ISO
+- CPIO
+- XAR
+- CAB
+- LHA/LZH
 
-## Installation
+如果压缩包损坏、格式不支持或无法读取，会在预览界面显示错误状态。对于能列出目录但无法读取内容的压缩包，仍会尽量展示可获得的条目元数据。
 
-### Option 1: Download Release (Recommended)
+### Markdown
 
-1. Download the latest `PeekX-X.X.dmg` from the [Releases](https://github.com/altic-dev/PeekX/releases) page
-2. Open the DMG file
-3. Drag PeekX to your Applications folder
-4. Launch PeekX once to register the Quick Look extension
-5. The app will automatically register and quit
+Markdown 文件会在白色背景中渲染显示，支持常见标题、列表、代码块、引用、链接、表格和基础行内样式。
 
-### Option 2: Build from Source
+### 原生文件预览
+
+右侧预览会优先使用 macOS 原生 Quick Look / 系统框架能力展示内容，例如：
+
+- 图片：JPEG、PNG、HEIC 等
+- PDF
+- 音频和视频
+- DOCX
+- 文本、源码、脚本、JSON、XML、YAML 等
+
+## 构建
+
+要求：
+
+- macOS 14.0 或更高版本
+- Xcode
+- Apple Silicon 或 Intel Mac
+
+构建命令：
 
 ```bash
-# Clone the repository
-git clone https://github.com/altic-dev/PeekX.git
-cd PeekX
+git clone https://github.com/pohister/PeekX-enhanced.git
+cd PeekX-enhanced
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project PeekX.xcodeproj -scheme PeekX -configuration Debug build
+```
 
-# Open in Xcode and build
+也可以直接用 Xcode 打开：
+
+```bash
 open PeekX.xcodeproj
-# Build the PeekX scheme (Cmd+B)
 ```
 
-## Usage
+然后选择 `PeekX` scheme 并构建。
 
-Once installed, using PeekX is straightforward:
+## 安装和刷新 Quick Look
 
-1. Open Finder
-2. Navigate to any folder
-3. Select the folder
-4. Press **Space** or click the Quick Look button
-5. View instant folder analysis and contents
+构建后，把生成的 `PeekX.app` 放到 `/Applications`，启动一次应用以注册 Quick Look 扩展。
 
-The Quick Look preview will display:
-- Total number of files and subfolders
-- Total folder size
-- Breakdown by file type
-- Large file identification
-- Folder structure visualization
+如果 Finder 仍然没有使用新扩展，可以刷新 Quick Look：
 
-## Uninstallation
-
-To remove PeekX:
-
-1. Quit PeekX if running
-2. Delete `PeekX.app` from your Applications folder
-3. (Optional) Reset Quick Look cache:
-   ```bash
-   qlmanage -r cache
-   killall Finder
-   ```
-
-## Development
-
-### Project Structure
-
+```bash
+qlmanage -r
+qlmanage -r cache
+killall Finder
 ```
+
+也可以结束 Quick Look 相关进程后重新预览：
+
+```bash
+pkill -f PeekXExt || true
+pkill -f QuickLookUIService || true
+pkill -f quicklookd || true
+```
+
+## 工程结构
+
+```text
 PeekX/
-├── PeekX/                  # Main application
-│   ├── PeekXApp.swift     # App entry point
-│   └── Assets.xcassets/   # App icons and resources
-├── PeekXExt/              # Quick Look extension
-│   ├── PreviewViewController.swift  # Main preview logic
-│   └── Info.plist         # Extension configuration
-└── Shared/                # Shared code between app and extension
-    ├── Constants.swift
-    └── SharedSettings.swift
+├── PeekX/                         # 主应用
+│   ├── PeekXApp.swift             # 应用入口和扩展注册提示
+│   └── Info.plist                 # 应用支持的文档类型声明
+├── PeekXExt/                      # Quick Look 扩展
+│   ├── PreviewViewController.swift
+│   ├── ArchiveSupport.swift       # 压缩包 provider、listing、entry、libarchive 封装
+│   └── Info.plist                 # Quick Look 支持的 UTType
+└── ThirdParty/libarchive/         # 内置 libarchive 头文件、静态库和许可证
 ```
 
-### Building
+## 实现说明
 
-Open the project in Xcode and build the PeekX scheme. The extension will be automatically embedded in the main application bundle.
+- `ArchiveProvider` / `ArchiveProviderRegistry` 负责压缩包后端扩展。
+- `LibarchiveArchiveProvider` 是当前默认实现。
+- `FileItem` 同时表示真实文件系统项目和压缩包内虚拟项目。
+- 压缩包预览默认先列目录和元数据；选中成员文件时才按需提取到临时目录用于预览。
+- UI 使用 AppKit 实现，文件内容预览结合 QuickLook、PDFKit、AVKit 和系统缩略图能力。
 
-## Architecture
+## 隐私
 
-PeekX consists of two main components:
+PeekX-enhanced 在本机运行，不上传文件内容，不收集遥测数据。扩展只访问你在 Finder 中主动触发 Quick Look 的文件、文件夹或压缩包。
 
-1. **Main Application (PeekX.app)** - A lightweight background agent that registers the Quick Look extension on launch
-2. **Quick Look Extension (PeekXExt.appex)** - The extension that handles folder preview generation
+## 排障
 
-The extension uses native macOS APIs to analyze folder contents and render previews using WebKit for a modern, responsive interface.
+检查扩展是否注册：
 
-## Privacy
+```bash
+pluginkit -m -v -p com.apple.quicklook.preview | grep PeekX
+```
 
-PeekX respects your privacy:
+如果预览仍显示旧版本，先刷新缓存并重启 Finder：
 
-- Runs entirely on your Mac with no network access
-- Does not collect or transmit any data
-- Fully sandboxed with minimal system permissions
-- Only accesses folders you explicitly view in Quick Look
+```bash
+qlmanage -r
+qlmanage -r cache
+killall Finder
+```
 
-## Troubleshooting
-
-### Extension not showing up
-
-If the Quick Look extension doesn't appear after installation:
-
-1. Ensure PeekX.app is in `/Applications`
-2. Launch PeekX once to register the extension
-3. Reset Quick Look cache:
-   ```bash
-   qlmanage -r cache
-   killall Finder
-   ```
-4. Check extension status:
-   ```bash
-   pluginkit -m -v -p com.apple.quicklook.preview | grep PeekX
-   ```
-
-### Permission issues
-
-If you see permission errors, verify that:
-- PeekX has necessary permissions in System Settings
-- The app is properly code-signed
-- You're running macOS 14.0 or later
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues and pull requests.
-
-### Guidelines
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/your-feature`)
-3. Commit your changes (`git commit -am 'Add new feature'`)
-4. Push to the branch (`git push origin feature/your-feature`)
-5. Create a Pull Request
-
-Please ensure your code:
-- Follows Swift style guidelines
-- Includes appropriate comments
-- Maintains compatibility with macOS 14.0+
-- Does not introduce new dependencies without discussion
+如果压缩包不能列出内容，请确认格式本身没有损坏，并尝试用系统归档工具或其他解压软件验证该压缩包是否可读。
 
 ## License
 
-PeekX is licensed under the MIT License. See [LICENSE](LICENSE) for details.
-
-Copyright (c) 2025 ALTIC
-
-## Acknowledgments
-
-Built with:
-- Swift and SwiftUI
-- macOS Quick Look APIs
-
-
-## Support
-
-### Bug Reports
-
-Found a bug? Please report it on [GitHub Issues](https://github.com/altic-dev/PeekX/issues):
-
-- Check existing issues first to avoid duplicates
-- Include your macOS version and system information
-- Provide steps to reproduce the issue
-- Attach relevant logs or screenshots if possible
-
-### Feature Requests
-
-Have an idea for a new feature? We'd love to hear it!
-
-- Open a feature request on [GitHub Issues](https://github.com/altic-dev/PeekX/issues)
-- Describe the feature and why it would be useful
-- Include any mockups or examples if applicable
-- Label your issue with "enhancement"
-
-All feature requests are reviewed and prioritized based on community interest and feasibility.
-
+PeekX-enhanced 使用 MIT License。第三方 libarchive 相关文件保留其原始许可证，见 `ThirdParty/libarchive/licenses/COPYING`。

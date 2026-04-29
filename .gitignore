@@ -45,6 +45,8 @@ iOSInjectionProject/
 
 # macOS
 .DS_Store
+*.app/
+*.dmg
 
 # Test files
 test_analysis.swift
@@ -55,4 +57,4 @@ RELEASE_NOTES_*.md
 BUILD_GUIDE.md
 SETUP_INSTRUCTIONS.txt
 releases/
-**.txt 
+**.txt

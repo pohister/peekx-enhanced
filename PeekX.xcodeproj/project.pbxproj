@@ -7,13 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		7CDABF20F8632EC889840099AE98 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CDABFF5C49A2EC889840099AE98 /* Constants.swift */; };
-		7CDABF36EC132EC889840099AE98 /* SharedSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CDABFED2B4A2EC889840099AE98 /* SharedSettings.swift */; };
+		585B41F52FA1F8B700845F76 /* ServiceManagement.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 585B41F42FA1F8B700845F76 /* ServiceManagement.framework */; };
 		7CDABF592EC889840099AE98 /* Quartz.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7CDABF582EC889840099AE98 /* Quartz.framework */; };
 		7CDABF652EC889840099AE98 /* PeekXExt.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 7CDABF562EC889840099AE98 /* PeekXExt.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		7CDABFF3080A2EC889840099AE98 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CDABFF5C49A2EC889840099AE98 /* Constants.swift */; };
-		7CDABFFC81B22EC889840099AE98 /* SharedSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CDABFED2B4A2EC889840099AE98 /* SharedSettings.swift */; };
-		7CDAC1012F0000000099AE98 /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7CDAC1002F0000000099AE98 /* WebKit.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -41,12 +37,10 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		585B41F42FA1F8B700845F76 /* ServiceManagement.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ServiceManagement.framework; path = System/Library/Frameworks/ServiceManagement.framework; sourceTree = SDKROOT; };
 		7CDABF122EC87E700099AE98 /* PeekX.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PeekX.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7CDABF562EC889840099AE98 /* PeekXExt.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = PeekXExt.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		7CDABF582EC889840099AE98 /* Quartz.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Quartz.framework; path = System/Library/Frameworks/Quartz.framework; sourceTree = SDKROOT; };
-		7CDABFED2B4A2EC889840099AE98 /* SharedSettings.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SharedSettings.swift; sourceTree = "<group>"; };
-		7CDABFF5C49A2EC889840099AE98 /* Constants.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
-		7CDAC1002F0000000099AE98 /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -57,11 +51,21 @@
 			);
 			target = 7CDABF552EC889840099AE98 /* PeekXExt */;
 		};
+		7CDAC1022F0000000099AE98 /* Exceptions for "PeekX" folder in "PeekX" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 7CDABF112EC87E700099AE98 /* PeekX */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		7CDABF142EC87E700099AE98 /* PeekX */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				7CDAC1022F0000000099AE98 /* Exceptions for "PeekX" folder in "PeekX" target */,
+			);
 			path = PeekX;
 			sourceTree = "<group>";
 		};
@@ -80,6 +84,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				585B41F52FA1F8B700845F76 /* ServiceManagement.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -88,7 +93,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				7CDABF592EC889840099AE98 /* Quartz.framework in Frameworks */,
-				7CDAC1012F0000000099AE98 /* WebKit.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -100,7 +104,6 @@
 			children = (
 				7CDABF142EC87E700099AE98 /* PeekX */,
 				7CDABF5A2EC889840099AE98 /* PeekXExt */,
-				7CDABFC695242EC889840099AE98 /* Shared */,
 				7CDABF572EC889840099AE98 /* Frameworks */,
 				7CDABF132EC87E700099AE98 /* Products */,
 			);
@@ -118,19 +121,10 @@
 		7CDABF572EC889840099AE98 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				585B41F42FA1F8B700845F76 /* ServiceManagement.framework */,
 				7CDABF582EC889840099AE98 /* Quartz.framework */,
-				7CDAC1002F0000000099AE98 /* WebKit.framework */,
 			);
 			name = Frameworks;
-			sourceTree = "<group>";
-		};
-		7CDABFC695242EC889840099AE98 /* Shared */ = {
-			isa = PBXGroup;
-			children = (
-				7CDABFF5C49A2EC889840099AE98 /* Constants.swift */,
-				7CDABFED2B4A2EC889840099AE98 /* SharedSettings.swift */,
-			);
-			path = Shared;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -242,8 +236,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				7CDABFF3080A2EC889840099AE98 /* Constants.swift in Sources */,
-				7CDABF36EC132EC889840099AE98 /* SharedSettings.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -251,8 +243,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				7CDABF20F8632EC889840099AE98 /* Constants.swift in Sources */,
-				7CDABFFC81B22EC889840099AE98 /* SharedSettings.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -396,21 +386,19 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = V4J43B279J;
+				DEVELOPMENT_TEAM = A85F7774CU;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_LSUIElement = YES;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = PeekX/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.1;
-				PRODUCT_BUNDLE_IDENTIFIER = altic.PeekX;
+				PRODUCT_BUNDLE_IDENTIFIER = com.pohister.PeekX;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -431,21 +419,19 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = V4J43B279J;
+				DEVELOPMENT_TEAM = A85F7774CU;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_LSUIElement = YES;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = PeekX/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.1;
-				PRODUCT_BUNDLE_IDENTIFIER = altic.PeekX;
+				PRODUCT_BUNDLE_IDENTIFIER = com.pohister.PeekX;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -463,14 +449,14 @@
 				CODE_SIGN_ENTITLEMENTS = PeekXExt/PeekXExt.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = V4J43B279J;
+				DEVELOPMENT_TEAM = A85F7774CU;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = PeekXExt/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = PeekXExt;
+				INFOPLIST_KEY_CFBundleDisplayName = "PeekX QuickLook";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -478,7 +464,15 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MARKETING_VERSION = 1.1;
-				PRODUCT_BUNDLE_IDENTIFIER = altic.PeekX.PeekXExt;
+				OTHER_LDFLAGS = (
+					"$(PROJECT_DIR)/ThirdParty/libarchive/lib/libarchive.a",
+					"-lz",
+					"-lbz2",
+					"-llzma",
+					"-lxml2",
+					"-liconv",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.pohister.PeekX.PeekXExt;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -495,14 +489,14 @@
 				CODE_SIGN_ENTITLEMENTS = PeekXExt/PeekXExt.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = V4J43B279J;
+				DEVELOPMENT_TEAM = A85F7774CU;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = PeekXExt/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = PeekXExt;
+				INFOPLIST_KEY_CFBundleDisplayName = "PeekX QuickLook";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -510,7 +504,15 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MARKETING_VERSION = 1.1;
-				PRODUCT_BUNDLE_IDENTIFIER = altic.PeekX.PeekXExt;
+				OTHER_LDFLAGS = (
+					"$(PROJECT_DIR)/ThirdParty/libarchive/lib/libarchive.a",
+					"-lz",
+					"-lbz2",
+					"-llzma",
+					"-lxml2",
+					"-liconv",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.pohister.PeekX.PeekXExt;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

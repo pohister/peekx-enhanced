@@ -2,22 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleDisplayName</key>
-	<string>PeekX QuickLook</string>
-	<key>CFBundleExecutable</key>
-	<string>$(EXECUTABLE_NAME)</string>
-	<key>CFBundleIdentifier</key>
-	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-	<key>CFBundleInfoDictionaryVersion</key>
-	<string>6.0</string>
-	<key>CFBundleName</key>
-	<string>$(PRODUCT_NAME)</string>
-	<key>CFBundlePackageType</key>
-	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
-	<key>CFBundleShortVersionString</key>
-	<string>1.1</string>
-	<key>CFBundleVersion</key>
-	<string>2</string>
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionAttributes</key>
@@ -27,6 +11,30 @@
 				<string>public.folder</string>
 				<string>net.daringfireball.markdown</string>
 				<string>public.plain-text</string>
+				<string>public.archive</string>
+				<string>public.zip-archive</string>
+				<string>com.winzip.zipx-archive</string>
+				<string>public.tar-archive</string>
+				<string>org.gnu.gnu-zip-tar-archive</string>
+				<string>public.tar-bzip2-archive</string>
+				<string>org.tukaani.tar-xz-archive</string>
+				<string>com.facebook.zstandard-tar-archive</string>
+				<string>org.7-zip.7-zip-archive</string>
+				<string>com.rarlab.rar-archive</string>
+				<string>public.iso-image</string>
+				<string>public.cpio-archive</string>
+				<string>com.apple.xar-archive</string>
+				<string>com.microsoft.cab</string>
+				<string>public.archive.lha</string>
+				<string>com.sun.java-archive</string>
+				<string>com.sun.web-application-archive</string>
+				<string>org.gnu.gnu-zip-archive</string>
+				<string>public.bzip2-archive</string>
+				<string>org.tukaani.xz-archive</string>
+				<string>org.tukaani.lzma-archive</string>
+				<string>com.facebook.zstandard-archive</string>
+				<string>public.lz4-archive</string>
+				<string>public.z-archive</string>
 			</array>
 			<key>QLSupportsSearchableItems</key>
 			<false/>
