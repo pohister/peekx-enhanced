@@ -50,6 +50,8 @@
 				<string>com.facebook.zstandard-tar-archive</string>
 				<string>org.7-zip.7-zip-archive</string>
 				<string>com.rarlab.rar-archive</string>
+				<string>com.pohister.peekx.rar-archive</string>
+				<string>dyn.ah62d4rv4ge81e2pw</string>
 				<string>public.iso-image</string>
 				<string>public.cpio-archive</string>
 				<string>com.apple.xar-archive</string>
@@ -101,30 +103,9 @@
 				<string>public.archive</string>
 			</array>
 			<key>UTTypeDescription</key>
-			<string>7-Zip archive</string>
-			<key>UTTypeIdentifier</key>
-			<string>org.7-zip.7-zip-archive</string>
-			<key>UTTypeTagSpecification</key>
-			<dict>
-				<key>public.filename-extension</key>
-				<array>
-					<string>7z</string>
-				</array>
-				<key>public.mime-type</key>
-				<array>
-					<string>application/x-7z-compressed</string>
-				</array>
-			</dict>
-		</dict>
-		<dict>
-			<key>UTTypeConformsTo</key>
-			<array>
-				<string>public.archive</string>
-			</array>
-			<key>UTTypeDescription</key>
 			<string>RAR archive</string>
 			<key>UTTypeIdentifier</key>
-			<string>com.rarlab.rar-archive</string>
+			<string>com.pohister.peekx.rar-archive</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
@@ -135,118 +116,6 @@
 				<array>
 					<string>application/vnd.rar</string>
 					<string>application/x-rar-compressed</string>
-				</array>
-			</dict>
-		</dict>
-		<dict>
-			<key>UTTypeConformsTo</key>
-			<array>
-				<string>public.archive</string>
-			</array>
-			<key>UTTypeDescription</key>
-			<string>CAB archive</string>
-			<key>UTTypeIdentifier</key>
-			<string>com.microsoft.cab</string>
-			<key>UTTypeTagSpecification</key>
-			<dict>
-				<key>public.filename-extension</key>
-				<array>
-					<string>cab</string>
-				</array>
-				<key>public.mime-type</key>
-				<array>
-					<string>application/vnd.ms-cab-compressed</string>
-				</array>
-			</dict>
-		</dict>
-		<dict>
-			<key>UTTypeConformsTo</key>
-			<array>
-				<string>public.archive</string>
-			</array>
-			<key>UTTypeDescription</key>
-			<string>XZ archive</string>
-			<key>UTTypeIdentifier</key>
-			<string>org.tukaani.xz-archive</string>
-			<key>UTTypeTagSpecification</key>
-			<dict>
-				<key>public.filename-extension</key>
-				<array>
-					<string>xz</string>
-				</array>
-				<key>public.mime-type</key>
-				<array>
-					<string>application/x-xz</string>
-				</array>
-			</dict>
-		</dict>
-		<dict>
-			<key>UTTypeConformsTo</key>
-			<array>
-				<string>public.archive</string>
-			</array>
-			<key>UTTypeDescription</key>
-			<string>XZ compressed tar archive</string>
-			<key>UTTypeIdentifier</key>
-			<string>org.tukaani.tar-xz-archive</string>
-			<key>UTTypeTagSpecification</key>
-			<dict>
-				<key>public.filename-extension</key>
-				<array>
-					<string>txz</string>
-					<string>tar.xz</string>
-				</array>
-			</dict>
-		</dict>
-		<dict>
-			<key>UTTypeConformsTo</key>
-			<array>
-				<string>public.archive</string>
-			</array>
-			<key>UTTypeDescription</key>
-			<string>Zstandard archive</string>
-			<key>UTTypeIdentifier</key>
-			<string>com.facebook.zstandard-archive</string>
-			<key>UTTypeTagSpecification</key>
-			<dict>
-				<key>public.filename-extension</key>
-				<array>
-					<string>zst</string>
-				</array>
-			</dict>
-		</dict>
-		<dict>
-			<key>UTTypeConformsTo</key>
-			<array>
-				<string>public.archive</string>
-			</array>
-			<key>UTTypeDescription</key>
-			<string>Zstandard compressed tar archive</string>
-			<key>UTTypeIdentifier</key>
-			<string>com.facebook.zstandard-tar-archive</string>
-			<key>UTTypeTagSpecification</key>
-			<dict>
-				<key>public.filename-extension</key>
-				<array>
-					<string>tzst</string>
-					<string>tar.zst</string>
-				</array>
-			</dict>
-		</dict>
-		<dict>
-			<key>UTTypeConformsTo</key>
-			<array>
-				<string>public.archive</string>
-			</array>
-			<key>UTTypeDescription</key>
-			<string>LZ4 archive</string>
-			<key>UTTypeIdentifier</key>
-			<string>public.lz4-archive</string>
-			<key>UTTypeTagSpecification</key>
-			<dict>
-				<key>public.filename-extension</key>
-				<array>
-					<string>lz4</string>
 				</array>
 			</dict>
 		</dict>

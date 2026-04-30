@@ -112,16 +112,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshQuickLookExtension() {
-        let reset = Process()
-        reset.executableURL = URL(fileURLWithPath: "/usr/bin/qlmanage")
-        reset.arguments = ["-r", "cache"]
-        try? reset.run()
-        reset.waitUntilExit()
-
+        // Kill quicklookd first so it loads fresh on restart
         let kill = Process()
         kill.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        kill.arguments = ["quicklookd"]
+        kill.arguments = ["-9", "quicklookd"]
         try? kill.run()
+        kill.waitUntilExit()
+
+        // Let launchd restart quicklookd
+        Thread.sleep(forTimeInterval: 1.0)
+
+        // Tell the new instance to reload generators
+        let reload = Process()
+        reload.executableURL = URL(fileURLWithPath: "/usr/bin/qlmanage")
+        reload.arguments = ["-r"]
+        try? reload.run()
+        reload.waitUntilExit()
+
+        // Also kill Finder so it reconnects to the fresh quicklookd
+        let killFinder = Process()
+        killFinder.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        killFinder.arguments = ["-9", "Finder"]
+        try? killFinder.run()
     }
 
     private func showUpdateNotification() {

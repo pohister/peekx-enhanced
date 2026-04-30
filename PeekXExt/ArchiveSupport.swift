@@ -2,6 +2,7 @@
 // Copyright © 2025 ALTIC. All rights reserved.
 
 import Foundation
+import Darwin
 import UniformTypeIdentifiers
 
 struct ArchiveEntry {
@@ -64,6 +65,10 @@ enum ArchiveProviderError: LocalizedError {
 }
 
 final class LibarchiveArchiveProvider: ArchiveProvider {
+    init() {
+        setlocale(LC_ALL, "")
+    }
+
     private let archiveType = UTType("public.archive")
     private let supportedTypeIdentifiers: Set<String> = [
         "public.archive",
@@ -76,6 +81,9 @@ final class LibarchiveArchiveProvider: ArchiveProvider {
         "com.facebook.zstandard-tar-archive",
         "org.7-zip.7-zip-archive",
         "com.rarlab.rar-archive",
+        "com.pohister.peekx.rar-archive",
+        "com.rarlab.rar",
+        "dyn.ah62d4rv4ge81e2pw",
         "public.iso-image",
         "public.cpio-archive",
         "com.apple.xar-archive",
@@ -180,9 +188,12 @@ final class LibarchiveArchiveProvider: ArchiveProvider {
             }
         }
 
+        // Fix libarchive occasionally misidentifying RAR5 as ZIP
+        let formatDesc = correctedFormatName(detectedFormat, for: url)
+
         return ArchiveListing(
             archiveURL: url,
-            formatDescription: detectedFormat,
+            formatDescription: formatDesc,
             entries: entries,
             warning: warning
         )
@@ -318,6 +329,22 @@ final class LibarchiveArchiveProvider: ArchiveProvider {
             path.removeFirst()
         }
         return path
+    }
+
+    private func correctedFormatName(_ rawFormat: String, for url: URL) -> String {
+        let ext = url.pathExtension.lowercased()
+        let extensionFormat: [String: String] = [
+            "rar": "RAR", "7z": "7-Zip", "zip": "ZIP", "tar": "TAR",
+            "gz": "GZip", "bz2": "BZip2", "xz": "XZ", "iso": "ISO 9660",
+            "cab": "CAB", "cpio": "CPIO", "xar": "XAR", "lha": "LHA",
+            "lzh": "LZH", "zst": "Zstandard", "lz4": "LZ4",
+            "tgz": "TAR.GZ", "tbz2": "TAR.BZ2", "txz": "TAR.XZ",
+        ]
+        guard let expected = extensionFormat[ext],
+              !rawFormat.lowercased().contains(expected.lowercased()) else {
+            return rawFormat
+        }
+        return expected
     }
 
     private func errorMessage(from archive: OpaquePointer?) -> String {
