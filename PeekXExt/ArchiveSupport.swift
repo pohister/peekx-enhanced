@@ -1,4 +1,4 @@
-// PeekX - Archive Preview Support
+// PeekX - 压缩包预览支持
 // Copyright © 2025 ALTIC. All rights reserved.
 
 import Foundation
@@ -21,6 +21,11 @@ struct ArchiveListing {
     let warning: String?
 }
 
+/// 可插拔的压缩包后端接口。
+///
+/// 后续如果要接入新的解析器，只需要实现该协议并注册到
+/// `ArchiveProviderRegistry`；预览控制器不需要知道条目来自 libarchive、
+/// 未来的原生解析器，还是其他实现。
 protocol ArchiveProvider {
     func canOpen(_ url: URL, contentType: UTType?) -> Bool
     func listContents(of url: URL) throws -> ArchiveListing
@@ -37,6 +42,8 @@ final class ArchiveProviderRegistry {
     }
 
     func provider(for url: URL, contentType: UTType?) -> ArchiveProvider? {
+        // 注册顺序有意义：第一个匹配的 provider 会被使用，
+        // 以后可以把更专用的实现插到 libarchive 这个通用兜底前面。
         providers.first { $0.canOpen(url, contentType: contentType) }
     }
 }
@@ -66,6 +73,7 @@ enum ArchiveProviderError: LocalizedError {
 
 final class LibarchiveArchiveProvider: ArchiveProvider {
     init() {
+        // 当压缩包没有 UTF-8 路径元数据时，让 libarchive 按用户本地语言环境解码文件名。
         setlocale(LC_ALL, "")
     }
 
@@ -81,9 +89,7 @@ final class LibarchiveArchiveProvider: ArchiveProvider {
         "com.facebook.zstandard-tar-archive",
         "org.7-zip.7-zip-archive",
         "com.rarlab.rar-archive",
-        "com.pohister.peekx.rar-archive",
         "com.rarlab.rar",
-        "dyn.ah62d4rv4ge81e2pw",
         "public.iso-image",
         "public.cpio-archive",
         "com.apple.xar-archive",
@@ -132,6 +138,8 @@ final class LibarchiveArchiveProvider: ArchiveProvider {
         }
         defer { archive_read_free(archive) }
 
+        // 启用内置 libarchive 编译出的全部格式和过滤器，用于覆盖 zip、tar.*、7z、
+        // rar、iso、cpio、xar、cab 等格式。
         guard archive_read_support_filter_all(archive) == archiveOK,
               archive_read_support_format_all(archive) == archiveOK else {
             throw ArchiveProviderError.readFailed(errorMessage(from: archive))
@@ -177,6 +185,8 @@ final class LibarchiveArchiveProvider: ArchiveProvider {
 
             entries.append(makeEntry(from: entryPointer, path: path))
 
+            // 列表模式只读 header，不读文件 body；这样可以快速展示目录树，
+            // 也避免为了列表预览而解出用户文件内容。
             let skipStatus = archive_read_data_skip(archive)
             if skipStatus < archiveWarn {
                 let message = errorMessage(from: archive)
@@ -188,7 +198,7 @@ final class LibarchiveArchiveProvider: ArchiveProvider {
             }
         }
 
-        // Fix libarchive occasionally misidentifying RAR5 as ZIP
+        // 有些文件 libarchive 返回的格式名不够直观，用扩展名修正用户可见的描述。
         let formatDesc = correctedFormatName(detectedFormat, for: url)
 
         return ArchiveListing(
@@ -322,6 +332,8 @@ final class LibarchiveArchiveProvider: ArchiveProvider {
             return nil
         }
 
+        // 压缩包里常见 "./foo" 或看起来像绝对路径的 "/foo"；
+        // 先归一化，再用于构建虚拟树和匹配解压目标。
         while path.hasPrefix("./") {
             path.removeFirst(2)
         }
@@ -362,6 +374,8 @@ private let archiveEOF: Int32 = 1
 private let archiveWarn: Int32 = -20
 private let archiveEntryDirectory: UInt32 = 0o040000
 
+// 这里打包的是静态 libarchive，没有单独的 Swift module map；
+// 因此只把 PeekX 实际用到的一小段 C API 直接声明出来。
 @_silgen_name("archive_read_new")
 private func archive_read_new() -> OpaquePointer?
 

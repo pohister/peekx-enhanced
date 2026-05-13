@@ -50,8 +50,6 @@
 				<string>com.facebook.zstandard-tar-archive</string>
 				<string>org.7-zip.7-zip-archive</string>
 				<string>com.rarlab.rar-archive</string>
-				<string>com.pohister.peekx.rar-archive</string>
-				<string>dyn.ah62d4rv4ge81e2pw</string>
 				<string>public.iso-image</string>
 				<string>public.cpio-archive</string>
 				<string>com.apple.xar-archive</string>
@@ -105,7 +103,7 @@
 			<key>UTTypeDescription</key>
 			<string>RAR archive</string>
 			<key>UTTypeIdentifier</key>
-			<string>com.pohister.peekx.rar-archive</string>
+			<string>com.rarlab.rar-archive</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>

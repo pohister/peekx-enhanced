@@ -8,7 +8,7 @@ import AppKit
 import UserNotifications
 import ServiceManagement
 
-// MARK: - App Entry
+// MARK: - 应用入口
 
 @main
 struct PeekXApp: App {
@@ -19,20 +19,20 @@ struct PeekXApp: App {
     }
 }
 
-// MARK: - App Delegate
+// MARK: - 应用代理
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // ── Menu bar only (no Dock icon) ──
+        // 只作为菜单栏应用运行，不在 Dock 中显示图标。
         NSApp.setActivationPolicy(.accessory)
 
         requestNotificationPermission()
         checkAndRefreshExtensionIfNeeded()
 
-        // ── Build status bar item ──
+        // 创建菜单栏按钮，点击后打开设置窗口。
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             let icon = NSImage(named: "MenuIcon") ??
@@ -44,10 +44,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.target = self
         }
 
-        // ── Don't auto-quit; stay alive for the menu bar ──
+        // 不自动退出，保持常驻以便菜单栏入口可用。
     }
 
-    // MARK: - Settings window
+    // MARK: - 设置窗口
 
     @objc private func toggleSettings() {
         if let window = settingsWindow, window.isVisible {
@@ -72,7 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.center()
         window.makeKeyAndOrderFront(nil)
 
-        // Position near the status item if possible
+        // 尽量让设置窗口贴近菜单栏图标弹出。
         if let button = statusItem.button, let screen = button.window?.screen {
             let buttonFrame = button.window!.convertToScreen(button.frame)
             let windowOrigin = NSPoint(
@@ -86,7 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    // MARK: - Extension registration
+    // MARK: - 扩展刷新
 
     private func requestNotificationPermission() {
         let center = UNUserNotificationCenter.current()
@@ -112,24 +112,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshQuickLookExtension() {
-        // Kill quicklookd first so it loads fresh on restart
+        // 版本变化后刷新 Quick Look 服务，避免系统继续使用旧扩展缓存。
         let kill = Process()
         kill.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
         kill.arguments = ["-9", "quicklookd"]
         try? kill.run()
         kill.waitUntilExit()
 
-        // Let launchd restart quicklookd
+        // 给 launchd 一点时间重新拉起 quicklookd。
         Thread.sleep(forTimeInterval: 1.0)
 
-        // Tell the new instance to reload generators
+        // 通知新的 quicklookd 重新加载预览生成器。
         let reload = Process()
         reload.executableURL = URL(fileURLWithPath: "/usr/bin/qlmanage")
         reload.arguments = ["-r"]
         try? reload.run()
         reload.waitUntilExit()
 
-        // Also kill Finder so it reconnects to the fresh quicklookd
+        // 让 Finder 重新连接到新的 quicklookd 实例。
         let killFinder = Process()
         killFinder.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
         killFinder.arguments = ["-9", "Finder"]
@@ -153,7 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-// MARK: - Settings View
+// MARK: - 设置视图
 
 struct SettingsView: View {
     let quitAction: () -> Void
@@ -169,7 +169,7 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
+            // 顶部应用信息。
             HStack {
                 if let appIcon = NSApp.applicationIconImage {
                     Image(nsImage: appIcon)
@@ -190,7 +190,7 @@ struct SettingsView: View {
 
             Divider().padding(.horizontal, 20)
 
-            // ── Auto-launch ──
+            // 登录时自动启动。
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("开机自启").font(.body)
@@ -210,7 +210,7 @@ struct SettingsView: View {
 
             Divider().padding(.horizontal, 20)
 
-            // ── Permissions ──
+            // 完全磁盘访问权限状态。
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("完全磁盘访问权限").font(.body)
@@ -256,7 +256,7 @@ struct SettingsView: View {
 
             Divider().padding(.horizontal, 20)
 
-            // ── Bottom actions ──
+            // 底部操作按钮。
             HStack {
                 Button("退出 PeekX") {
                     quitAction()
@@ -272,7 +272,7 @@ struct SettingsView: View {
         .onAppear { checkPermissions() }
     }
 
-    // MARK: - Actions
+    // MARK: - 操作
 
     private func setLaunchAtLogin(_ enabled: Bool) {
         guard #available(macOS 13.0, *) else { return }
@@ -299,7 +299,7 @@ struct SettingsView: View {
     }
 
     static func hasFullDiskAccess() -> Bool {
-        // Try to access a file that requires Full Disk Access
+        // 通过读取受保护目录判断是否已经授予完全磁盘访问权限。
         let testPaths = [
             "\(NSHomeDirectory())/Library/Mail",
             "\(NSHomeDirectory())/Library/Safari",
@@ -309,12 +309,12 @@ struct SettingsView: View {
             let url = URL(fileURLWithPath: path)
             if let contents = try? FileManager.default.contentsOfDirectory(at: url,
                 includingPropertiesForKeys: nil, options: .skipsHiddenFiles) {
-                // Successfully read a protected directory → FDA granted
+                // 能读取受保护目录，说明完全磁盘访问权限已授予。
                 _ = contents
                 return true
             }
         }
-        // Fallback: try a known FDA-protected file
+        // 兜底检查一个通常受完全磁盘访问保护的文件。
         let safariHistory = "\(NSHomeDirectory())/Library/Safari/History.db"
         if FileManager.default.isReadableFile(atPath: safariHistory) {
             return true
@@ -323,7 +323,7 @@ struct SettingsView: View {
     }
 
     private func openFullDiskAccessSettings() {
-        // Opens System Settings → Privacy → Full Disk Access
+        // 打开系统设置中的“隐私与安全性 > 完全磁盘访问权限”。
         NSWorkspace.shared.open(
             URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!
         )

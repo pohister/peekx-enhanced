@@ -52,6 +52,8 @@ iOSInjectionProject/
 test_analysis.swift
 
 *.sh
+!script/register_quicklook_extension.sh
+!script/package_dmg.sh
 
 RELEASE_NOTES_*.md
 BUILD_GUIDE.md

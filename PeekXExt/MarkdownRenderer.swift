@@ -1,13 +1,226 @@
-// PeekX - Markdown Rendering Engine
+// PeekX - Markdown 渲染引擎
 // Copyright © 2025 ALTIC. All rights reserved.
 
 import Cocoa
+import JavaScriptCore
 
-// MARK: - Markdown Renderer
+struct MarkdownRenderResult {
+    let html: String
+    let plainText: String
+    let rendererName: String
+    let fallbackReason: String?
+}
+
+private protocol MarkdownHTMLRendering {
+    var name: String { get }
+    func render(markdown: String, sourceURL: URL) throws -> String
+}
+
+private enum MarkdownRenderFailure: LocalizedError {
+    case vsCodeNotInstalled
+    case vsCodeRendererMissing(URL)
+    case vsCodeJavaScriptFailed(String)
+    case vsCodeEmptyOutput
+
+    var errorDescription: String? {
+        switch self {
+        case .vsCodeNotInstalled:
+            return "Visual Studio Code.app was not found in /Applications or ~/Applications."
+        case .vsCodeRendererMissing(let appURL):
+            return "VS Code markdown-it renderer was not found inside \(appURL.path)."
+        case .vsCodeJavaScriptFailed(let message):
+            return "VS Code markdown-it renderer failed: \(message)"
+        case .vsCodeEmptyOutput:
+            return "VS Code markdown-it renderer produced empty HTML."
+        }
+    }
+}
+
+private struct VSCodeMarkdownRenderer: MarkdownHTMLRendering {
+    let name = "VS Code MarkdownIt"
+
+    private static let rendererRelativePath = "Contents/Resources/app/extensions/markdown-language-features/notebook-out/index.js"
+
+    func render(markdown: String, sourceURL _: URL) throws -> String {
+        guard let appURL = Self.applicationURL() else {
+            throw MarkdownRenderFailure.vsCodeNotInstalled
+        }
+        let rendererURL = appURL.appendingPathComponent(Self.rendererRelativePath)
+        guard FileManager.default.fileExists(atPath: rendererURL.path) else {
+            throw MarkdownRenderFailure.vsCodeRendererMissing(appURL)
+        }
+
+        let htmlFragment = try Self.renderHTMLFragment(markdown, rendererURL: rendererURL)
+        guard !htmlFragment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw MarkdownRenderFailure.vsCodeEmptyOutput
+        }
+        return MarkdownRenderer.originalMarkdownHTML(body: """
+            <div id="content">\(htmlFragment)</div>
+        """)
+    }
+
+    private static func applicationURL() -> URL? {
+        let homeApplicationsURL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent("Applications", isDirectory: true)
+        let candidates = [
+            URL(fileURLWithPath: "/Applications/Visual Studio Code.app", isDirectory: true),
+            URL(fileURLWithPath: "/Applications/Visual Studio Code - Insiders.app", isDirectory: true),
+            homeApplicationsURL.appendingPathComponent("Visual Studio Code.app", isDirectory: true),
+            homeApplicationsURL.appendingPathComponent("Visual Studio Code - Insiders.app", isDirectory: true)
+        ]
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private static func renderHTMLFragment(_ markdown: String, rendererURL: URL) throws -> String {
+        guard let context = JSContext() else {
+            throw MarkdownRenderFailure.vsCodeJavaScriptFailed("Could not create JavaScriptCore context.")
+        }
+
+        var exceptionMessage: String?
+        context.exceptionHandler = { _, exception in
+            exceptionMessage = exception?.toString()
+        }
+
+        context.evaluateScript(javaScriptDOMStub)
+        try throwIfNeeded(exceptionMessage)
+
+        // 直接复用 VS Code 自带的 markdown-it 打包文件，尽量获得和 VS Code
+        // 一致的 Markdown 语法表现。
+        let rendererSource = try String(contentsOf: rendererURL, encoding: .utf8)
+        guard rendererSource.contains("export{lu as activate};") else {
+            throw MarkdownRenderFailure.vsCodeJavaScriptFailed("Unsupported VS Code renderer bundle format.")
+        }
+        context.evaluateScript(rendererSource.replacingOccurrences(
+            of: "export{lu as activate};",
+            with: "globalThis.__activate = lu;"
+        ))
+        try throwIfNeeded(exceptionMessage)
+
+        context.evaluateScript("globalThis.__renderer = globalThis.__activate({ workspace: { isTrusted: true } });")
+        try throwIfNeeded(exceptionMessage)
+
+        let markdownData = try JSONSerialization.data(withJSONObject: [markdown])
+        guard let markdownJSON = String(data: markdownData, encoding: .utf8) else {
+            throw MarkdownRenderFailure.vsCodeJavaScriptFailed("Could not serialize Markdown input.")
+        }
+
+        // VS Code 的渲染器面向浏览器环境，这里用 JavaScriptCore 和最小 DOM stub
+        // 只捕获它写入的 HTML 字符串。
+        context.evaluateScript("""
+            globalThis.__capturedHTML = "";
+            globalThis.__markdownInput = \(markdownJSON)[0];
+            globalThis.__renderer.renderOutputItem(
+                {
+                    mime: "text/markdown",
+                    text: function() { return globalThis.__markdownInput; }
+                },
+                {
+                    attachShadow: function() {
+                        return {
+                            appendChild: function() {},
+                            getElementById: function() { return null; }
+                        };
+                    }
+                }
+            );
+        """)
+        try throwIfNeeded(exceptionMessage)
+
+        return context.objectForKeyedSubscript("__capturedHTML")?.toString() ?? ""
+    }
+
+    private static func throwIfNeeded(_ message: String?) throws {
+        if let message, !message.isEmpty {
+            throw MarkdownRenderFailure.vsCodeJavaScriptFailed(message)
+        }
+    }
+
+    // 供 VS Code 渲染器运行的最小 DOM 环境；没有真实页面，只记录 innerHTML。
+    private static let javaScriptDOMStub = """
+        globalThis.__capturedHTML = "";
+        var window = globalThis;
+        var document = {
+            documentElement: {
+                style: {
+                    getPropertyValue: function() { return ""; }
+                }
+            },
+            head: {
+                appendChild: function() {}
+            },
+            createElement: function(tag) {
+                var element = {
+                    tagName: tag,
+                    id: "",
+                    classList: {
+                        add: function() {},
+                        remove: function() {}
+                    },
+                    content: {
+                        appendChild: function() {},
+                        cloneNode: function() { return {}; }
+                    },
+                    appendChild: function() {},
+                    cloneNode: function() { return this; },
+                    attachShadow: function() {
+                        return {
+                            appendChild: function() {},
+                            getElementById: function() { return null; }
+                        };
+                    }
+                };
+                Object.defineProperty(element, "innerHTML", {
+                    get: function() { return globalThis.__capturedHTML; },
+                    set: function(value) { globalThis.__capturedHTML = value; }
+                });
+                Object.defineProperty(element, "innerText", {
+                    get: function() { return globalThis.__capturedHTML; },
+                    set: function(value) { globalThis.__capturedHTML = value; }
+                });
+                return element;
+            },
+            getElementById: function() {
+                return {
+                    cloneNode: function() { return {}; }
+                };
+            },
+            getElementsByClassName: function() {
+                return [];
+            }
+        };
+    """
+}
+
+// MARK: - Markdown 渲染器
 
 enum MarkdownRenderer {
 
-    // MARK: - Public API
+    // MARK: - 对外接口
+
+    static func renderMarkdownDocument(_ markdown: String, sourceURL: URL) -> MarkdownRenderResult {
+        let vsCodeRenderer = VSCodeMarkdownRenderer()
+        do {
+            let html = try vsCodeRenderer.render(markdown: markdown, sourceURL: sourceURL)
+            return MarkdownRenderResult(
+                html: html,
+                plainText: markdown,
+                rendererName: vsCodeRenderer.name,
+                fallbackReason: nil
+            )
+        } catch {
+            // VS Code 未安装或其内部打包格式变化时，回退到内置轻量解析器。
+            return MarkdownRenderResult(
+                html: makeOriginalMarkdownHTML(fromMarkdown: markdown),
+                plainText: markdown,
+                rendererName: "Built-in",
+                fallbackReason: renderFailureDescription(error)
+            )
+        }
+    }
+
+    private static func renderFailureDescription(_ error: Error) -> String {
+        (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
 
     static func makeHTML(fromMarkdown markdown: String) -> String {
         if markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -62,6 +275,14 @@ enum MarkdownRenderer {
             p { margin: 0 0 16px 0; }
             a { color: #0969da; text-decoration: none; }
             a:hover { text-decoration: underline; }
+            strong { font-weight: 600; }
+            em { font-style: italic; }
+            ul, ol {
+                margin: 0 0 16px 24px;
+                padding-left: 20px;
+            }
+            li { margin: 4px 0; }
+            li p { margin: 0 0 8px 0; }
             pre, code {
                 font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
             }
@@ -72,16 +293,15 @@ enum MarkdownRenderer {
                 border-radius: 4px;
             }
             pre {
+                white-space: pre;
                 background: #f6f8fa;
                 padding: 16px;
                 border-radius: 8px;
                 overflow-x: auto;
                 border: 1px solid #e1e4e8;
                 margin: 16px 0;
-                white-space: pre-wrap;
-                word-break: break-word;
             }
-            pre code { background: none; padding: 0; white-space: pre-wrap; word-break: break-word; }
+            pre code { white-space: pre; background: none; padding: 0; }
             .md-list-item { margin: 4px 0; }
             .md-list-marker {
                 font-family: -apple-system, BlinkMacSystemFont, sans-serif;
@@ -96,6 +316,8 @@ enum MarkdownRenderer {
                 border-left: 4px solid #d0d7de;
                 color: #57606a;
             }
+            details { margin: 16px 0; }
+            summary { font-weight: 600; }
             .details-summary {
                 margin: 20px 0 12px 0;
                 font-weight: 600;
@@ -114,11 +336,7 @@ enum MarkdownRenderer {
         """
     }
 
-    static func markdownLoadingHTML() -> String {
-        originalMarkdownHTML(body: "<p>Loading...</p>")
-    }
-
-    // MARK: - Text Preview Setup
+    // MARK: - 文本预览设置
 
     static func setTextPreview(_ text: String, in textView: NSTextView, markdown: Bool, fontSize: CGFloat) {
         let foregroundColor: NSColor = markdown ? .black : .labelColor
@@ -143,122 +361,93 @@ enum MarkdownRenderer {
         } else {
             textView.string = text
         }
-        textView.scrollToBeginningOfDocument(nil)
-        DispatchQueue.main.async {
-            DispatchQueue.main.async {
-                if let sv = textView.enclosingScrollView {
-                    sv.contentView.scroll(to: NSPoint(x: 0, y: sv.contentView.bounds.origin.y))
-                }
-            }
-        }
+
+        resetPreviewScrollPosition(in: textView)
     }
 
     static func setRenderedHTMLPreview(_ html: String, in textView: NSTextView) {
-        let backgroundColor = NSColor.white
-        textView.drawsBackground = true
-        textView.backgroundColor = backgroundColor
+        let t0 = CFAbsoluteTimeGetCurrent()
+        textView.font = NSFont.systemFont(ofSize: 14)
         textView.textColor = .black
+        textView.drawsBackground = true
+        textView.backgroundColor = .white
         textView.enclosingScrollView?.drawsBackground = true
-        textView.enclosingScrollView?.backgroundColor = backgroundColor
+        textView.enclosingScrollView?.backgroundColor = .white
         textView.enclosingScrollView?.contentView.drawsBackground = true
-        textView.enclosingScrollView?.contentView.backgroundColor = backgroundColor
+        textView.enclosingScrollView?.contentView.backgroundColor = .white
+        textView.textContainerInset = NSSize(width: 16, height: 16)
+        textView.textContainer?.widthTracksTextView = true
 
-        let scrollView = textView.enclosingScrollView
-        let viewportWidth = max(scrollView?.contentView.bounds.width ?? 640, 100)
-
-        // Freeze container to viewport width before HTML import.
-        // Otherwise the importer uses a default ~980 px paper width and lays
-        // out glyphs too wide, pushing horizontal scroll off the left edge.
-        textView.textContainer?.widthTracksTextView = false
-        textView.textContainer?.containerSize = NSSize(width: viewportWidth, height: CGFloat.greatestFiniteMagnitude)
-
+        let t1 = CFAbsoluteTimeGetCurrent()
+        // NSTextView 只能显示 NSAttributedString，因此 HTML 最终仍需要导入成富文本。
+        // 这里记录耗时，便于排查 Markdown 预览导致的主线程卡顿。
         if let data = html.data(using: .utf8),
            let attributed = try? NSAttributedString(
-                data: data,
-                options: [
-                    .documentType: NSAttributedString.DocumentType.html,
-                    .characterEncoding: String.Encoding.utf8.rawValue
-                ],
-                documentAttributes: nil
+            data: data,
+            options: [
+                .documentType: NSAttributedString.DocumentType.html,
+                .characterEncoding: String.Encoding.utf8.rawValue
+            ],
+            documentAttributes: nil
            ) {
-            let rendered = NSMutableAttributedString(attributedString: attributed)
-            flattenImportedHTMLListMarkers(in: rendered)
-            textView.textStorage?.setAttributedString(rendered)
+            let t2 = CFAbsoluteTimeGetCurrent()
+            textView.textStorage?.setAttributedString(removingImportedTextLists(from: attributed))
+            let t3 = CFAbsoluteTimeGetCurrent()
+            resetPreviewScrollPosition(in: textView)
+            let t4 = CFAbsoluteTimeGetCurrent()
+            DebugLogger.shared.log(String(format: "[PERF] HTML render: setup=%.1fms import=%.1fms setAttr=%.1fms scroll=%.1fms total=%.1fms",
+                                          (t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t2) * 1000, (t4 - t3) * 1000, (t4 - t0) * 1000))
         } else {
             textView.string = html
+            resetPreviewScrollPosition(in: textView)
+            DebugLogger.shared.log(String(format: "[PERF] HTML render fallback: total=%.1fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000))
+        }
+    }
+
+    private static func removingImportedTextLists(from attributed: NSAttributedString) -> NSAttributedString {
+        let mutable = NSMutableAttributedString(attributedString: attributed)
+        let fullRange = NSRange(location: 0, length: mutable.length)
+        // AppKit 导入 HTML 列表时会再叠加一套 NSTextList 标记，
+        // 对已经包含项目符号的 HTML 会造成“双点”显示，因此移除它。
+        mutable.enumerateAttribute(.paragraphStyle, in: fullRange) { value, range, _ in
+            guard
+                let paragraphStyle = value as? NSParagraphStyle,
+                paragraphStyle.textLists.isEmpty == false,
+                let mutableStyle = paragraphStyle.mutableCopy() as? NSMutableParagraphStyle
+            else { return }
+
+            mutableStyle.textLists = []
+            mutable.addAttribute(.paragraphStyle, value: mutableStyle, range: range)
+        }
+        return mutable
+    }
+
+    private static func resetPreviewScrollPosition(in textView: NSTextView) {
+        func applyReset() {
+            guard let scrollView = textView.enclosingScrollView else { return }
+            textView.setSelectedRange(NSRange(location: 0, length: 0))
+            textView.scrollToBeginningOfDocument(nil)
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: scrollView.contentView.bounds.origin.y))
+            scrollView.horizontalScroller?.floatValue = 0
+            scrollView.reflectScrolledClipView(scrollView.contentView)
         }
 
-        // setAttributedString triggers deferred layout. Double async waits
-        // for two run-loop ticks so layout finishes before we reset scroll.
+        // NSTextView 在设置富文本后会异步重算布局；多次轻量重置可以稳定保证
+        // Markdown 初始横向滚动条位于最左侧。
+        applyReset()
         DispatchQueue.main.async {
-            DispatchQueue.main.async {
-                textView.scrollToBeginningOfDocument(nil)
-                if let sv = textView.enclosingScrollView {
-                    sv.contentView.scroll(to: NSPoint(x: 0, y: sv.contentView.bounds.origin.y))
-                }
-                textView.textContainer?.widthTracksTextView = true
+            applyReset()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                applyReset()
             }
         }
     }
 
-    static func flattenImportedHTMLListMarkers(in attributed: NSMutableAttributedString) {
-        let originalString = attributed.string as NSString
-        let fullRange = NSRange(location: 0, length: originalString.length)
-        var paragraphRanges: [NSRange] = []
-
-        originalString.enumerateSubstrings(in: fullRange, options: [.byParagraphs, .substringNotRequired]) { _, _, enclosingRange, _ in
-            paragraphRanges.append(enclosingRange)
-        }
-
-        for paragraphRange in paragraphRanges.reversed() {
-            guard paragraphRange.location < attributed.length else { continue }
-            guard let paragraphStyle = attributed.attribute(.paragraphStyle, at: paragraphRange.location, effectiveRange: nil) as? NSParagraphStyle,
-                  !paragraphStyle.textLists.isEmpty else { continue }
-
-            let currentString = attributed.string as NSString
-            let availableLength = min(paragraphRange.length, currentString.length - paragraphRange.location)
-            guard availableLength >= 3 else { continue }
-
-            let paragraphText = currentString.substring(with: NSRange(location: paragraphRange.location, length: availableLength)) as NSString
-            guard paragraphText.character(at: 0) == 9 else { continue }
-
-            var secondTabIndex: Int?
-            for index in 1..<paragraphText.length {
-                let character = paragraphText.character(at: index)
-                if character == 9 {
-                    secondTabIndex = index
-                    break
-                }
-                if character == 10 || character == 13 {
-                    break
-                }
-            }
-
-            if let secondTabIndex {
-                let marker = paragraphText.substring(with: NSRange(location: 1, length: secondTabIndex - 1))
-                let replacement = marker == "•" ? "•  " : "\(marker).  "
-                attributed.replaceCharacters(
-                    in: NSRange(location: paragraphRange.location, length: secondTabIndex + 1),
-                    with: replacement
-                )
-
-                let flattenedStyle = NSMutableParagraphStyle()
-                flattenedStyle.setParagraphStyle(paragraphStyle)
-                flattenedStyle.textLists = []
-                flattenedStyle.firstLineHeadIndent = 0
-                flattenedStyle.headIndent = 0
-                flattenedStyle.tabStops = []
-                let newLength = max(0, availableLength - (secondTabIndex + 1) + (replacement as NSString).length)
-                let styleRange = NSRange(
-                    location: paragraphRange.location,
-                    length: min(newLength, attributed.length - paragraphRange.location)
-                )
-                attributed.addAttribute(.paragraphStyle, value: flattenedStyle, range: styleRange)
-            }
-        }
+    static func markdownLoadingHTML() -> String {
+        originalMarkdownHTML(body: "<p>Loading...</p>")
     }
 
-    // MARK: - HTML Escaping
+    // MARK: - HTML 转义
 
     static func escapedHTML(_ text: String) -> String {
         text
@@ -269,7 +458,7 @@ enum MarkdownRenderer {
             .replacingOccurrences(of: "'", with: "&#39;")
     }
 
-    // MARK: - Core Markdown to HTML
+    // MARK: - 内置 Markdown 到 HTML
 
     static func renderMarkdownHTML(_ markdown: String) -> String {
         let normalized = markdown
@@ -290,6 +479,7 @@ enum MarkdownRenderer {
         func closeList() {}
 
         func flushCodeBlock() {
+            // 代码块后追加空行，避免下一段文本紧贴代码块边框。
             output.append("<pre><code>\(escapedHTML(codeLines.joined(separator: "\n")))</code></pre><br>")
             codeLines.removeAll()
         }
@@ -411,7 +601,7 @@ enum MarkdownRenderer {
         return output.joined(separator: "\n")
     }
 
-    // MARK: - Block Element Parsers
+    // MARK: - 块级元素解析
 
     static func markdownHeadingLevel(_ line: String) -> Int? {
         var level = 0
@@ -493,7 +683,7 @@ enum MarkdownRenderer {
         )
     }
 
-    // MARK: - Table Rendering
+    // MARK: - 表格渲染
 
     static func isMarkdownTableSeparator(_ line: String) -> Bool {
         let compact = line.trimmingCharacters(in: .whitespaces)
@@ -543,13 +733,14 @@ enum MarkdownRenderer {
         }
     }
 
-    // MARK: - Inline Rendering
+    // MARK: - 行内元素渲染
 
     static func renderMarkdownInline(_ text: String) -> String {
         var html = escapedHTML(text)
         var codePlaceholders: [String: String] = [:]
         html = replaceMarkdownPattern("!\\[([^\\]]*)\\]\\(([^\\)]+)\\)", in: html, with: "<img src=\"$2\" alt=\"$1\">")
         html = replaceMarkdownPattern("\\[([^\\]]+)\\]\\(([^\\)]+)\\)", in: html, with: "<a href=\"$2\">$1</a>")
+        // 行内代码先用占位符保护，避免其中的星号、下划线被强调规则误处理。
         html = replaceInlineCodeSpans(in: html, placeholders: &codePlaceholders)
         html = replaceMarkdownPattern("\\*\\*([^*]+)\\*\\*", in: html, with: "<strong>$1</strong>")
         html = replaceMarkdownPattern("(?<![\\p{L}\\p{N}])__([^_\\n]+?)__(?![\\p{L}\\p{N}])", in: html, with: "<strong>$1</strong>")

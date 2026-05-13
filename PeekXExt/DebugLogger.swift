@@ -1,4 +1,4 @@
-// PeekX - Debug Logger
+// PeekX - 调试日志
 // Copyright © 2025 ALTIC. All rights reserved.
 
 import Foundation
@@ -7,7 +7,9 @@ final class DebugLogger {
     static let shared = DebugLogger()
 
     private let fileURL: URL
+    // Quick Look 扩展里的标准输出不稳定，异步写入临时日志更适合排查现场问题。
     private let queue = DispatchQueue(label: "com.peekx.logger", qos: .utility)
+    private let mirrorsToConsole = false
     private let formatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -22,13 +24,16 @@ final class DebugLogger {
     }
 
     func log(_ message: String) {
-        let timestamp = formatter.string(from: Date())
-        let entry = "[\(timestamp)] \(message)\n"
+        let date = Date()
         queue.async {
+            let timestamp = self.formatter.string(from: date)
+            let entry = "[\(timestamp)] \(message)\n"
             if let data = entry.data(using: .utf8) {
                 self.append(data)
             }
-            NSLog("%@", message)
+            if self.mirrorsToConsole {
+                NSLog("%@", message)
+            }
         }
     }
 

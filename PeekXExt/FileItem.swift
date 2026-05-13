@@ -1,12 +1,16 @@
-// PeekX - File Item Model
+// PeekX - 文件项模型
 // Copyright © 2025 ALTIC. All rights reserved.
 
 import Cocoa
 import Quartz
 import UniformTypeIdentifiers
 
-// MARK: - File Item Model
+// MARK: - 文件项模型
 
+/// 大纲列表中的一行。
+///
+/// `FileItem` 同时表示真实文件系统条目和压缩包内的虚拟条目。
+/// 统一模型可以让大纲列表、复制路径、排序和元信息显示共用同一套逻辑。
 final class FileItem: NSObject, QLPreviewItem {
     let url: URL
     let name: String
@@ -45,6 +49,8 @@ final class FileItem: NSObject, QLPreviewItem {
         super.init()
     }
 
+    /// 为压缩包内条目创建虚拟行。这里的 `url` 仍指向压缩包本身，
+    /// 因为成员文件只有在需要预览时才会被临时解出。
     init(
         archiveURL: URL,
         entryPath: String,
@@ -79,6 +85,7 @@ final class FileItem: NSObject, QLPreviewItem {
         guard let archiveURL, let archiveEntryPath else {
             return url.path
         }
+        // 使用常见的压缩包路径写法，避免复制出来的路径和真实路径混淆。
         return "\(archiveURL.path)!/\(archiveEntryPath)"
     }
 
@@ -127,16 +134,18 @@ final class FileItem: NSObject, QLPreviewItem {
     func setChildren(_ children: [FileItem]) {
         self.children = children
         self.childrenLoaded = true
+        // 父节点弱引用只用于树结构和界面状态，不参与所有权管理。
         for child in children {
             child.parent = self
         }
     }
 
+    // QLPreviewItem 只能预览真实文件，不能直接预览压缩包内的虚拟条目。
     var previewItemURL: URL? { isArchiveEntry ? nil : url }
     var previewItemTitle: String { name }
 }
 
-// MARK: - URL Preview Item
+// MARK: - URL 预览项
 
 final class URLPreviewItem: NSObject, QLPreviewItem {
     let previewItemURL: URL?

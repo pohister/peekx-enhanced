@@ -1,4 +1,4 @@
-// PeekX - Folder Preview Extension for macOS
+// PeekX - macOS Quick Look 预览扩展
 // Copyright © 2025 ALTIC. All rights reserved.
 
 import Cocoa
@@ -10,13 +10,17 @@ import ImageIO
 import PDFKit
 import AVKit
 import QuartzCore
-
-// MARK: - Preview View Controller
+// MARK: - 预览主控制器
 
 @objc(PreviewViewController)
+/// Quick Look 扩展的主控制器。
+///
+/// 本文件负责 AppKit 视图层级、大纲列表的数据源/代理、分割视图、图标缓存、
+/// 键盘快捷键和共享预览容器。具体文件类型的加载流程放在
+/// `PreviewViewController+Previews.swift`，让界面骨架和预览流水线分开。
 final class PreviewViewController: NSViewController, QLPreviewingController, NSSplitViewDelegate {
 
-    // MARK: - UI Components
+    // MARK: - 界面组件
 
     var mainStack: NSStackView!
     var scrollView: FinderScrollView!
@@ -44,11 +48,11 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
     var previewInfoLabel: NSTextField!
     var previewMessageLabel: NSTextField!
 
-    // MARK: - Performance Caches
+    // MARK: - 性能缓存
 
     let iconCache = NSCache<NSString, NSImage>()
 
-    // MARK: - Data State
+    // MARK: - 数据状态
 
     var rootItems: [FileItem] = []
     var currentSortDescriptor: NSSortDescriptor? = NSSortDescriptor(key: "name", ascending: true, selector: #selector(NSString.localizedStandardCompare(_:)))
@@ -65,11 +69,17 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
     var activeNativePreviewItem: QLPreviewItem?
     var suppressOutlineSelectionSync = false
     var didSetInitialSplitPosition = false
+    var selectionPreviewWorkItem: DispatchWorkItem?
     var previewUpdateWorkItem: DispatchWorkItem?
     var scrollWheelMonitor: Any?
+    var mouseDownLatencyMonitor: Any?
+    var pointerInteractionPriorityUntil: CFAbsoluteTime = 0
+    var pointerInteractionGeneration: UInt64 = 0
     var extractedPreviewCache: [String: URL] = [:]
     var extractedPreviewDirectoryURL: URL?
     lazy var extractedPreviewDirectory: URL = {
+        // 需要交给系统 Quick Look 预览的压缩包成员会先解到该控制器专属临时目录，
+        // 控制器释放时统一清理。
         let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("PeekXArchivePreviews", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -78,7 +88,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         return directory
     }()
 
-    // MARK: - Formatters
+    // MARK: - 格式化器
 
     lazy var byteFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
@@ -97,6 +107,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
 
     deinit {
         previewUpdateWorkItem?.cancel()
+        selectionPreviewWorkItem?.cancel()
         previewImageLoadTask?.cancel()
         archivePreviewLoadTask?.cancel()
         previewTimeoutWorkItem?.cancel()
@@ -108,11 +119,21 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         if let scrollWheelMonitor {
             NSEvent.removeMonitor(scrollWheelMonitor)
         }
+        if let mouseDownLatencyMonitor {
+            NSEvent.removeMonitor(mouseDownLatencyMonitor)
+        }
     }
 
-    // MARK: - View Lifecycle
+    // MARK: - 视图生命周期
+
+    private var latencyCriticalActivity: NSObjectProtocol?
 
     override func loadView() {
+        // Quick Look 面板打开期间尽量避免 App Nap/进程节流增加事件投递延迟。
+        latencyCriticalActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .latencyCritical, .idleSystemSleepDisabled],
+            reason: "PeekX preview interaction requires low-latency event delivery"
+        )
         DebugLogger.shared.log("loadView started. Diagnostics log: \(DebugLogger.shared.locationDescription())")
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         container.translatesAutoresizingMaskIntoConstraints = false
@@ -133,6 +154,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = false
+        // 使用 legacy scroller 并关闭自动隐藏，保证横向/纵向滚动条始终可见。
         scrollView.scrollerStyle = .legacy
         scrollView.installTranslucentScrollers()
         scrollView.verticalScrollElasticity = .allowed
@@ -244,6 +266,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
     override func viewDidAppear() {
         super.viewDidAppear()
         installScrollWheelMonitorIfNeeded()
+        installMouseDownLatencyMonitorIfNeeded()
         outlineView.window?.makeFirstResponder(outlineView)
     }
 
@@ -253,45 +276,119 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
             didSetInitialSplitPosition = true
             setDefaultSplitPosition()
         }
-        updateOutlineScrollMetrics()
+        // 让大纲视图至少和可见区域一样高，使交替行背景能铺满空白区域。
+        // 这里不改变滚动位置。
+        let clipSize = scrollView.contentView.bounds.size
+        let frame = outlineView.frame
+        if frame.height < clipSize.height + 1 {
+            outlineView.setFrameSize(NSSize(width: frame.width, height: clipSize.height + 1))
+        }
     }
 
-    // MARK: - Scroll Wheel Monitor
+    // MARK: - 滚轮监控
 
     func installScrollWheelMonitorIfNeeded() {
         guard scrollWheelMonitor == nil else { return }
+        // 原生 AppKit 不会把悬停在底部滚动条附近的纵向滚轮转换为横向滚动；
+        // 这里为左侧列表和右侧预览区域统一补上该交互。
         scrollWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             guard let self,
                   abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX),
-                  let target = self.horizontalScrollViewUnderMouse(in: self.view, event: event)
+                  let target = self.scrollViewForHorizontalScroll(in: self.view, event: event)
             else {
                 return event
             }
-            return FinderScrollView.scrollHorizontallyIfNeeded(target, with: event) ? nil : event
+            return FinderScrollView.scrollHorizontally(target, with: event) ? nil : event
         }
     }
 
-    func horizontalScrollViewUnderMouse(in root: NSView, event: NSEvent) -> NSScrollView? {
-        func find(in view: NSView) -> NSScrollView? {
-            for subview in view.subviews.reversed() {
-                if let found = find(in: subview) {
-                    return found
-                }
+    func installMouseDownLatencyMonitorIfNeeded() {
+        guard mouseDownLatencyMonitor == nil else { return }
+        mouseDownLatencyMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            guard let self,
+                  event.window === self.view.window else {
+                return event
             }
 
-            guard let scrollView = view as? NSScrollView,
-                  !scrollView.isHiddenOrHasHiddenAncestor,
-                  scrollView.hasHorizontalScroller,
-                  scrollView.horizontalScroller != nil
-            else { return nil }
+            let eventAge = EventLatency.uptimeEventAgeMilliseconds(for: event)
+            let cgAge = EventLatency.formattedCGAge(for: event)
+            guard let point = self.visibleOutlinePoint(for: event) else {
+                DebugLogger.shared.log(String(format: "[PERF] localMouseDownMonitor outside outline: eventAge=%.1fms cgAge=%@",
+                                              eventAge, cgAge))
+                return event
+            }
+            let row = self.outlineView.row(at: point)
+            DebugLogger.shared.log(String(format: "[PERF] localMouseDownMonitor: eventAge=%.1fms cgAge=%@ row=%d",
+                                          eventAge, cgAge, row))
+            return self.handleFastOutlineMouseDown(event, point: point, row: row, eventAge: eventAge) ? nil : event
+        }
+    }
 
-            let point = scrollView.convert(event.locationInWindow, from: nil)
-            let inScroller = scrollView.horizontalScroller?.frame.contains(point) == true
-            let inBottomBand = point.y >= -2 && point.y <= scrollView.contentView.frame.minY + 28
-            return (inScroller || inBottomBand) ? scrollView : nil
+    func visibleOutlinePoint(for event: NSEvent) -> NSPoint? {
+        let clipPoint = scrollView.contentView.convert(event.locationInWindow, from: nil)
+        guard scrollView.contentView.bounds.contains(clipPoint) else {
+            return nil
         }
 
-        return find(in: root)
+        let point = outlineView.convert(event.locationInWindow, from: nil)
+        guard outlineView.visibleRect.contains(point) else {
+            return nil
+        }
+        return point
+    }
+
+    func handleFastOutlineMouseDown(_ event: NSEvent, point: NSPoint, row: Int, eventAge: TimeInterval) -> Bool {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        guard row >= 0,
+              outlineView.visibleRect.contains(point),
+              !event.modifierFlags.contains(.control)
+        else {
+            return false
+        }
+
+        notePointerInteraction(row: row, eventAge: eventAge)
+        let shouldExtend = event.modifierFlags.contains(.command) || event.modifierFlags.contains(.shift)
+        outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: shouldExtend)
+        outlineView.markSelectionForDisplay(row: row)
+        outlineView.displayIfNeeded()
+        outlineView.window?.makeFirstResponder(outlineView)
+
+        if outlineView.frameOfOutlineCell(atRow: row).contains(point),
+           let fileItem = outlineView.item(atRow: row) as? FileItem,
+           fileItem.isFolder {
+            if outlineView.isItemExpanded(fileItem) {
+                outlineView.collapseItem(fileItem)
+            } else {
+                outlineView.expandItem(fileItem)
+            }
+            updateOutlineScrollMetrics()
+            DebugLogger.shared.log(String(format: "[PERF] localMouseDownFastPath toggled row=%d expanded=%@ code=%.1fms",
+                                          row,
+                                          outlineView.isItemExpanded(fileItem) ? "true" : "false",
+                                          (CFAbsoluteTimeGetCurrent() - t0) * 1000))
+            return true
+        }
+
+        DebugLogger.shared.log(String(format: "[PERF] localMouseDownFastPath handled row=%d code=%.1fms",
+                                      row, (CFAbsoluteTimeGetCurrent() - t0) * 1000))
+        return true
+    }
+
+    func scrollViewForHorizontalScroll(in root: NSView, event: NSEvent) -> NSScrollView? {
+        for subview in root.subviews.reversed() {
+            if let found = scrollViewForHorizontalScroll(in: subview, event: event) {
+                return found
+            }
+        }
+        guard let scrollView = root as? NSScrollView,
+              !scrollView.isHiddenOrHasHiddenAncestor,
+              scrollView.hasHorizontalScroller
+        else { return nil }
+
+        let point = scrollView.convert(event.locationInWindow, from: nil)
+        let overScroller = scrollView.horizontalScroller?.frame.contains(point) == true
+        let inBottomBand = point.y >= -2 && point.y <= scrollView.contentView.frame.minY + 28
+        return (overScroller || inBottomBand) ? scrollView : nil
     }
 
     func applySystemPreviewCornerStyle(to view: NSView, backgroundColor: NSColor? = nil) {
@@ -304,7 +401,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         view.layer?.masksToBounds = true
     }
 
-    // MARK: - UI Builders
+    // MARK: - 界面构建
 
     func createHeaderView() -> NSView {
         let view = NSView()
@@ -350,13 +447,14 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         view.layoutSubtreeIfNeeded()
         let totalWidth = splitView.bounds.width
         guard totalWidth > 0 else { return }
+        // 分割线两侧留出空隙，避免视觉上贴住左侧圆角列表容器。
         let previewMin: CGFloat = 360
         let outlineMin: CGFloat = 320 + PreviewMetrics.dividerContentGap
         let desiredLeft = max(outlineMin, min(totalWidth - previewMin, totalWidth * 0.4 + PreviewMetrics.dividerContentGap))
         splitView.setPosition(desiredLeft, ofDividerAt: 0)
     }
 
-    // MARK: - NSSplitViewDelegate
+    // MARK: - 分割视图代理
 
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
         let leftMin: CGFloat = 280 + PreviewMetrics.dividerContentGap
@@ -423,6 +521,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
+        // 文本预览按面板宽度换行；图片和表格由各自预览容器处理滚动。
         textView.isHorizontallyResizable = false
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.containerSize = NSSize(width: 640, height: CGFloat.greatestFiniteMagnitude)
@@ -539,7 +638,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         ])
     }
 
-    // MARK: - Preview Surface Management
+    // MARK: - 预览表面管理
 
     func ensureNativePreviewView() -> QLPreviewView? {
         if let nativePreviewView {
@@ -595,6 +694,8 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
 
     func hidePreviewSurfaces(clearNativePreview: Bool = true) {
         if clearNativePreview {
+            // 离开系统 Quick Look 预览时必须清空 previewItem，
+            // 否则旧的系统渲染内容可能残留在右侧。
             activeNativePreviewItem = nil
             nativePreviewView?.previewItem = nil
         }
@@ -652,14 +753,16 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         }
     }
 
-    // MARK: - Layout Toggle
+    // MARK: - 布局切换
 
     func applySingleFileLayout(_ enabled: Bool) {
         mainStack.isHidden = enabled
-        singleFileScrollView.isHidden = !enabled
+        if !enabled {
+            singleFileScrollView.isHidden = true
+        }
     }
 
-    // MARK: - Header Icon
+    // MARK: - 头部图标
 
     func headerIcon(for url: URL) -> NSImage {
         let icon = NSWorkspace.shared.icon(forFile: url.path)
@@ -667,7 +770,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         return icon
     }
 
-    // MARK: - Sorting
+    // MARK: - 排序
 
     func sortFileItems(_ items: inout [FileItem]) {
         guard !items.isEmpty else { return }
@@ -748,10 +851,74 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         return rootItems
     }
 
-    // MARK: - Selection & Actions
+    // MARK: - 选中与操作
 
     var selectedItems: [FileItem] {
         outlineView.selectedRowIndexes.compactMap { outlineView.item(atRow: $0) as? FileItem }
+    }
+
+    func notePointerInteraction(row: Int, eventAge: TimeInterval) {
+        pointerInteractionGeneration &+= 1
+        pointerInteractionPriorityUntil = CFAbsoluteTimeGetCurrent() + PreviewMetrics.pointerInteractionPriorityWindow
+
+        // 鼠标点击已经到达且将改变选择时，先取消还没开始的旧预览上屏任务；
+        // 新选择会重新调度预览，这样右侧重绘不会抢在选中高亮之前执行。
+        if outlineView.selectedRowIndexes != IndexSet(integer: row) {
+            previewUpdateWorkItem?.cancel()
+            previewUpdateWorkItem = nil
+            selectionPreviewWorkItem?.cancel()
+            selectionPreviewWorkItem = nil
+        }
+
+        DebugLogger.shared.log(String(format: "[PERF] pointer priority window opened row=%d eventAge=%.1fms gen=%llu",
+                                      row, eventAge, pointerInteractionGeneration))
+    }
+
+    func enqueuePreviewSurfaceUpdate(
+        label: String,
+        requestID: UUID,
+        item: FileItem?,
+        delay minimumDelay: TimeInterval = PreviewMetrics.previewSurfaceUpdateDelay,
+        update: @escaping (PreviewViewController) -> Void
+    ) {
+        previewUpdateWorkItem?.cancel()
+
+        let now = CFAbsoluteTimeGetCurrent()
+        let interactionDelay = max(pointerInteractionPriorityUntil - now, 0)
+        let delay = max(minimumDelay, interactionDelay)
+        let expectedItem = item
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.previewUpdateWorkItem = nil
+
+            guard self.previewRequestID == requestID else { return }
+            if let expectedItem {
+                guard self.previewedItem === expectedItem else { return }
+            }
+
+            let remainingInteractionDelay = self.pointerInteractionPriorityUntil - CFAbsoluteTimeGetCurrent()
+            if remainingInteractionDelay > 0 {
+                self.enqueuePreviewSurfaceUpdate(
+                    label: label,
+                    requestID: requestID,
+                    item: expectedItem,
+                    delay: remainingInteractionDelay,
+                    update: update
+                )
+                return
+            }
+
+            let start = CFAbsoluteTimeGetCurrent()
+            update(self)
+            DebugLogger.shared.log(String(format: "[PERF] preview surface update %@ ran in %.1fms",
+                                          label, (CFAbsoluteTimeGetCurrent() - start) * 1000))
+        }
+
+        previewUpdateWorkItem = workItem
+        DebugLogger.shared.log(String(format: "[PERF] preview surface update %@ scheduled after %.1fms",
+                                      label, delay * 1000))
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     func actionPaths() -> [String] {
@@ -788,7 +955,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         return menu
     }()
 
-    // MARK: - Children Loading
+    // MARK: - 子节点加载
 
     func loadChildren(for item: FileItem, completion: @escaping () -> Void) {
         if item.isArchiveEntry {
@@ -799,6 +966,8 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
             completion()
             return
         }
+        // 展开文件夹可能访问慢速磁盘或 iCloud 占位文件，因此后台枚举，
+        // 主线程只接收最终 children 数组并刷新 UI。
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let start = CFAbsoluteTimeGetCurrent()
@@ -832,7 +1001,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         }
     }
 
-    // MARK: - Icon Loading
+    // MARK: - 图标加载
 
     func loadIcon(for item: FileItem, completion: @escaping (NSImage) -> Void) {
         if let icon = item.icon {
@@ -884,6 +1053,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
     }
 
     func iconCacheKey(for item: FileItem, sizeSuffix: String) -> NSString {
+        // 按类型缓存而不是按完整路径缓存，避免大文件夹中相同扩展名文件反复创建 NSImage。
         if item.isArchiveEntry {
             if item.isFolder {
                 return "archive-entry-folder-\(sizeSuffix)" as NSString
@@ -902,7 +1072,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
     }
 }
 
-// MARK: - NSOutlineViewDataSource
+// MARK: - 大纲列表数据源
 
 extension PreviewViewController: NSOutlineViewDataSource {
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
@@ -919,9 +1089,13 @@ extension PreviewViewController: NSOutlineViewDataSource {
     }
 }
 
-// MARK: - NSOutlineViewDelegate
+// MARK: - 大纲列表代理
 
 extension PreviewViewController: NSOutlineViewDelegate {
+    func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
+        FinderSelectionRowView()
+    }
+
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let fileItem = item as? FileItem,
               let identifier = tableColumn?.identifier else { return nil }
@@ -1018,14 +1192,17 @@ extension PreviewViewController: NSOutlineViewDelegate {
     func outlineViewSelectionDidChange(_ notification: Notification) {
         guard notification.object as? NSOutlineView === outlineView else { return }
         guard !suppressOutlineSelectionSync else { return }
-        // Defer preview update so the selection highlight renders first
-        DispatchQueue.main.async { [weak self] in
-            self?.syncPreviewWithSelection()
-        }
+        let t0 = CFAbsoluteTimeGetCurrent()
+        outlineView.markSelectionForDisplay(row: outlineView.selectedRow)
+        DebugLogger.shared.log(String(format: "[PERF] markSelectionForDisplay scheduled in %.1f ms", (CFAbsoluteTimeGetCurrent() - t0) * 1000))
+        // 元信息标签立即更新；真正的文件解码/渲染延后到
+        // `schedulePreviewWithCurrentSelection`，让大图、Markdown、PDF、iCloud 文件
+        // 也不阻塞选中反馈。
+        schedulePreviewWithCurrentSelection(after: PreviewMetrics.selectionPreviewDelay)
     }
 }
 
-// MARK: - NSMenuDelegate
+// MARK: - 菜单代理
 
 extension PreviewViewController: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
@@ -1039,7 +1216,7 @@ extension PreviewViewController: NSMenuDelegate {
     }
 }
 
-// MARK: - Quick Look Panel
+// MARK: - Quick Look 面板
 
 extension PreviewViewController: QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
@@ -1051,13 +1228,17 @@ extension PreviewViewController: QLPreviewPanelDataSource, QLPreviewPanelDelegat
     }
 }
 
-// MARK: - Outline Keyboard Delegate
+// MARK: - 大纲列表键盘代理
 
 extension PreviewViewController: FinderOutlineViewKeyboardDelegate {
+    func outlineViewWillHandleMouseDown(_ outlineView: FinderOutlineView, row: Int, eventAge: TimeInterval) {
+        notePointerInteraction(row: row, eventAge: eventAge)
+    }
+
     func outlineView(_ outlineView: FinderOutlineView, handle event: NSEvent) -> Bool {
         let commandPressed = event.modifierFlags.contains(.command)
         switch (event.keyCode, commandPressed) {
-        case (49, false): // Space
+        case (49, false): // 空格
             showQuickLook()
             return true
         case (_, true) where event.charactersIgnoringModifiers == "c":

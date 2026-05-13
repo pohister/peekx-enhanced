@@ -1,9 +1,9 @@
-// PeekX - DOCX Preview Support
+// PeekX - DOCX 预览支持
 // Copyright © 2025 ALTIC. All rights reserved.
 
 import Foundation
 
-// MARK: - DOCX Preview Error
+// MARK: - DOCX 预览错误
 
 enum DOCXPreviewError: LocalizedError {
     case missingDocumentXML
@@ -19,7 +19,7 @@ enum DOCXPreviewError: LocalizedError {
     }
 }
 
-// MARK: - DOCX Text Extractor
+// MARK: - DOCX 文本提取器
 
 final class DOCXTextExtractor: NSObject, XMLParserDelegate {
     private var text = ""
@@ -39,6 +39,7 @@ final class DOCXTextExtractor: NSObject, XMLParserDelegate {
         return normalize(text)
     }
 
+    // Word XML 使用命名空间标签；解析时只关心本地名称即可。
     func parser(
         _ parser: XMLParser,
         didStartElement elementName: String,

@@ -21,8 +21,6 @@
 				<string>com.facebook.zstandard-tar-archive</string>
 				<string>org.7-zip.7-zip-archive</string>
 				<string>com.rarlab.rar-archive</string>
-				<string>com.pohister.peekx.rar-archive</string>
-				<string>dyn.ah62d4rv4ge81e2pw</string>
 				<string>public.iso-image</string>
 				<string>public.cpio-archive</string>
 				<string>com.apple.xar-archive</string>
@@ -46,5 +44,30 @@
 		<key>NSExtensionPrincipalClass</key>
 		<string>PreviewViewController</string>
 	</dict>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.archive</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>RAR archive</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.rarlab.rar-archive</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>rar</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/vnd.rar</string>
+					<string>application/x-rar-compressed</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 </dict>
 </plist>
