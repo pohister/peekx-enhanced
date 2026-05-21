@@ -10,6 +10,7 @@ import ImageIO
 import PDFKit
 import AVKit
 import QuartzCore
+import WebKit
 // MARK: - 预览主控制器
 
 @objc(PreviewViewController)
@@ -37,12 +38,14 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
     var nativePreviewView: QLPreviewView?
     var pdfView: PDFView?
     var mediaPlayerView: AVPlayerView?
+    var officeWebView: WKWebView?
     var mediaPlayer: AVPlayer?
     var activeMediaSecurityScopedURL: URL?
     var textScrollView: NSScrollView!
     var textView: NSTextView!
     var singleFileScrollView: NSScrollView!
     var singleFileTextView: NSTextView!
+    var singleFileNativePreviewView: QLPreviewView?
     var previewSpinner: NSProgressIndicator!
     var previewTitleLabel: NSTextField!
     var previewInfoLabel: NSTextField!
@@ -73,6 +76,10 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
     var previewUpdateWorkItem: DispatchWorkItem?
     var scrollWheelMonitor: Any?
     var mouseDownLatencyMonitor: Any?
+    var previewMagnifyMonitor: Any?
+    var officeWebViewZoom: CGFloat = 1
+    var officeHasHorizontalDOMScrollRange = false
+    var lastPreviewGestureMagnification: CGFloat = 0
     var pointerInteractionPriorityUntil: CFAbsoluteTime = 0
     var pointerInteractionGeneration: UInt64 = 0
     var extractedPreviewCache: [String: URL] = [:]
@@ -121,6 +128,9 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         }
         if let mouseDownLatencyMonitor {
             NSEvent.removeMonitor(mouseDownLatencyMonitor)
+        }
+        if let previewMagnifyMonitor {
+            NSEvent.removeMonitor(previewMagnifyMonitor)
         }
     }
 
@@ -267,6 +277,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         super.viewDidAppear()
         installScrollWheelMonitorIfNeeded()
         installMouseDownLatencyMonitorIfNeeded()
+        installPreviewMagnifyMonitorIfNeeded()
         outlineView.window?.makeFirstResponder(outlineView)
     }
 
@@ -292,14 +303,545 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         // 原生 AppKit 不会把悬停在底部滚动条附近的纵向滚轮转换为横向滚动；
         // 这里为左侧列表和右侧预览区域统一补上该交互。
         scrollWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-            guard let self,
-                  abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX),
-                  let target = self.scrollViewForHorizontalScroll(in: self.view, event: event)
-            else {
+            guard let self else {
                 return event
             }
+            if self.officeWebView?.isHidden == false {
+                self.logOfficeScrollWheelEvent(event, source: "localMonitor")
+            }
+            if self.handleOfficeHorizontalScrollWheel(event) {
+                return nil
+            }
+            guard abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX),
+                  let target = self.scrollViewForHorizontalScroll(in: self.view, event: event)
+            else { return event }
             return FinderScrollView.scrollHorizontally(target, with: event) ? nil : event
         }
+    }
+
+    func installPreviewMagnifyMonitorIfNeeded() {
+        guard previewMagnifyMonitor == nil else { return }
+        // 图片视图和 WKWebView 都可能把触控板缩放事件交给内部子视图；
+        // local monitor 做兜底，保证右侧预览区域内的 pinch 能先到 PeekX。
+        previewMagnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify, .smartMagnify]) { [weak self] event in
+            guard let self, self.handlePreviewMagnify(event) else {
+                return event
+            }
+            return nil
+        }
+    }
+
+    func handlePreviewMagnify(_ event: NSEvent) -> Bool {
+        DebugLogger.shared.log("Preview magnify event received: type=\(event.type.rawValue) magnification=\(String(format: "%.4f", event.magnification))")
+        switch event.type {
+        case .magnify:
+            return handleImageMagnify(event) || handleOfficeMagnify(event)
+        case .smartMagnify:
+            return handleImageSmartMagnify(event) || handleOfficeSmartMagnify(event)
+        default:
+            return false
+        }
+    }
+
+    @objc func handlePreviewContainerMagnification(_ recognizer: NSMagnificationGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            lastPreviewGestureMagnification = recognizer.magnification
+            DebugLogger.shared.log("Preview container magnification began")
+        case .changed:
+            let delta = recognizer.magnification - lastPreviewGestureMagnification
+            lastPreviewGestureMagnification = recognizer.magnification
+            if abs(delta) > 0.0001 {
+                _ = applyVisiblePreviewMagnification(delta)
+            }
+        default:
+            lastPreviewGestureMagnification = 0
+            DebugLogger.shared.log("Preview container magnification ended")
+        }
+    }
+
+    func applyVisiblePreviewMagnification(_ magnification: CGFloat) -> Bool {
+        if previewImageView.isHidden == false, previewImageView.image != nil {
+            return previewImageView.applyMagnification(magnification)
+        }
+        if let webView = officeWebView, webView.isHidden == false {
+            return applyOfficeMagnification(magnification, to: webView)
+        }
+        return false
+    }
+
+    func handleImageMagnify(_ event: NSEvent) -> Bool {
+        guard previewImageView.isHidden == false,
+              previewImageView.image != nil,
+              eventIsInsideVisibleView(event, view: previewImageScrollView)
+        else { return false }
+
+        return previewImageView.applyMagnification(event.magnification)
+    }
+
+    func handleImageSmartMagnify(_ event: NSEvent) -> Bool {
+        guard previewImageView.isHidden == false,
+              previewImageView.image != nil,
+              eventIsInsideVisibleView(event, view: previewImageScrollView)
+        else { return false }
+
+        return previewImageView.toggleSmartZoom()
+    }
+
+    func handleOfficeMagnify(_ event: NSEvent) -> Bool {
+        guard let webView = officeWebView,
+              webView.isHidden == false,
+              eventIsInsideVisibleView(event, view: webView)
+        else { return false }
+
+        return applyOfficeMagnification(event.magnification, to: webView)
+    }
+
+    func applyOfficeMagnification(_ magnification: CGFloat, to webView: WKWebView) -> Bool {
+        let factor = max(0.2, 1 + magnification)
+        let nextZoom = min(max(officeWebViewZoom * factor, PreviewMetrics.officeZoomMinimum), PreviewMetrics.officeZoomMaximum)
+        guard abs(nextZoom - officeWebViewZoom) > 0.001 else { return true }
+
+        applyOfficeWebViewZoom(nextZoom, to: webView)
+        DebugLogger.shared.log(String(format: "Office WebView zoom changed to %.2f", nextZoom))
+        return true
+    }
+
+    func handleOfficeSmartMagnify(_ event: NSEvent) -> Bool {
+        guard let webView = officeWebView,
+              webView.isHidden == false,
+              eventIsInsideVisibleView(event, view: webView)
+        else { return false }
+
+        let nextZoom: CGFloat = officeWebViewZoom > 1.05 ? 1 : min(2, PreviewMetrics.officeZoomMaximum)
+        applyOfficeWebViewZoom(nextZoom, to: webView)
+        DebugLogger.shared.log(String(format: "Office WebView smart zoom changed to %.2f", nextZoom))
+        return true
+    }
+
+    func resetOfficeWebViewZoom(_ webView: WKWebView) {
+        applyOfficeWebViewZoom(1, to: webView)
+    }
+
+    func applyOfficeWebViewZoom(_ zoom: CGFloat, to webView: WKWebView) {
+        officeWebViewZoom = zoom
+        let center = NSPoint(x: webView.bounds.midX, y: webView.bounds.midY)
+        // Office 预览使用页面级 CSS zoom，而不是 WKWebView 原生 magnification。
+        // 原生 magnification 会产生 WebKit 内部视觉滚动范围，AppKit 侧拿不到稳定的
+        // NSScrollView，也无法用 DOM scrollLeft 控制横向滚动。
+        webView.setMagnification(1, centeredAt: center)
+        webView.pageZoom = 1
+        let script = """
+        (function(zoom) {
+          var root = document.documentElement;
+          var body = document.body;
+          var scrollRoot = document.getElementById("peekx-office-scroll-root");
+          var contentRoot = document.getElementById("peekx-office-content-root");
+          var zoomTarget = contentRoot || body;
+          if (!root || !body) { return false; }
+          if (scrollRoot) {
+            scrollRoot.style.overflow = "scroll";
+          } else {
+            root.style.overflow = "auto";
+            body.style.overflow = "auto";
+          }
+          zoomTarget.style.zoom = String(zoom);
+          zoomTarget.style.webkitTextSizeAdjust = "100%";
+          return JSON.stringify({
+            zoom: zoom,
+            hasScrollRoot: !!scrollRoot,
+            rootScrollWidth: root.scrollWidth || 0,
+            bodyScrollWidth: body.scrollWidth || 0,
+            scrollRootScrollWidth: scrollRoot ? scrollRoot.scrollWidth || 0 : -1,
+            scrollRootClientWidth: scrollRoot ? scrollRoot.clientWidth || 0 : -1,
+            rootClientWidth: root.clientWidth || 0,
+            bodyClientWidth: body.clientWidth || 0
+          });
+        })(\(String(format: "%.4f", Double(zoom))));
+        """
+        webView.evaluateJavaScript(script) { [weak self] result, error in
+            if let error {
+                DebugLogger.shared.log("Office WebView CSS zoom failed: \(error.localizedDescription)")
+            } else {
+                DebugLogger.shared.log("Office WebView CSS zoom applied: \(result ?? "nil")")
+                self?.refreshOfficeDOMScrollState(reason: "cssZoom")
+            }
+        }
+    }
+
+    func prepareOfficeWebViewForDocumentLoad(_ webView: WKWebView) {
+        officeHasHorizontalDOMScrollRange = false
+        applyOfficeWebViewZoom(1, to: webView)
+    }
+
+    func officeDOMScrollDiagnosticsScript() -> String {
+        """
+        JSON.stringify((function() {
+          var root = document.scrollingElement || document.documentElement || document.body;
+          var viewportWidth = Math.max(
+            1,
+            root && root.clientWidth || 0,
+            document.documentElement && document.documentElement.clientWidth || 0,
+            window.innerWidth || 0
+          );
+          var nodes = [];
+          function add(node) {
+            if (!node || nodes.indexOf(node) >= 0) { return; }
+            nodes.push(node);
+          }
+          add(document.getElementById("peekx-office-scroll-root"));
+          add(document.getElementById("peekx-office-content-root"));
+          add(root);
+          add(document.documentElement);
+          add(document.body);
+          Array.prototype.forEach.call(document.querySelectorAll("*"), add);
+
+          var maxScrollWidth = 0;
+          var maxHorizontalRange = 0;
+          var bestTag = "";
+          var bestClass = "";
+          function isDocumentScroller(node) {
+            return node === root || node === document.documentElement || node === document.body;
+          }
+          function canScrollHorizontally(node, range) {
+            if (range <= 1) { return false; }
+            if (node && node.id === "peekx-office-scroll-root") { return true; }
+            if (isDocumentScroller(node)) { return true; }
+            var style = window.getComputedStyle(node);
+            var overflowX = style.overflowX || style.overflow || "";
+            return /^(auto|scroll|overlay)$/i.test(overflowX);
+          }
+          for (var i = 0; i < nodes.length; i++) {
+            var node = nodes[i];
+            if (!node) { continue; }
+            var scrollWidth = Number(node.scrollWidth || 0);
+            var clientWidth = Number(node.clientWidth || 0);
+            if (isDocumentScroller(node)) {
+              clientWidth = Math.max(clientWidth, viewportWidth);
+            }
+            maxScrollWidth = Math.max(maxScrollWidth, scrollWidth);
+            var range = Math.max(scrollWidth - Math.max(clientWidth, 1), 0);
+            if (canScrollHorizontally(node, range) && range > maxHorizontalRange) {
+              maxHorizontalRange = range;
+              bestTag = node.tagName || "";
+              bestClass = node.className || "";
+            }
+          }
+
+          return {
+            title: document.title || "",
+            textLength: (document.body && document.body.innerText || "").length,
+            bodyChildren: document.body ? document.body.children.length : -1,
+            scrollWidth: root ? root.scrollWidth : -1,
+            scrollHeight: root ? root.scrollHeight : -1,
+            clientWidth: root ? root.clientWidth : -1,
+            bodyScrollWidth: document.body ? document.body.scrollWidth : -1,
+            firstElementScrollWidth: document.body && document.body.firstElementChild ? document.body.firstElementChild.scrollWidth : -1,
+            officeScrollRootWidth: document.getElementById("peekx-office-scroll-root") ? document.getElementById("peekx-office-scroll-root").scrollWidth : -1,
+            officeScrollRootClientWidth: document.getElementById("peekx-office-scroll-root") ? document.getElementById("peekx-office-scroll-root").clientWidth : -1,
+            maxElementScrollWidth: maxScrollWidth,
+            maxHorizontalRange: maxHorizontalRange,
+            horizontalScrollerTag: bestTag,
+            horizontalScrollerClass: String(bestClass).slice(0, 80)
+          };
+        })());
+        """
+    }
+
+    func refreshOfficeDOMScrollState(reason: String) {
+        guard let webView = officeWebView,
+              webView.isHidden == false
+        else { return }
+
+        webView.evaluateJavaScript(officeDOMScrollDiagnosticsScript()) { [weak self] result, error in
+            if let error {
+                DebugLogger.shared.log("Office WebView \(reason) diagnostics failed: \(error.localizedDescription)")
+                return
+            }
+            DebugLogger.shared.log("Office WebView \(reason) diagnostics: \(result ?? "nil")")
+            self?.updateOfficeDOMScrollState(from: result)
+        }
+    }
+
+    func updateOfficeDOMScrollState(from result: Any?) {
+        guard let json = result as? String,
+              let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return }
+
+        func number(_ key: String) -> CGFloat {
+            let value = object[key]
+            if let number = value as? NSNumber {
+                return CGFloat(truncating: number)
+            }
+            if let double = value as? Double {
+                return CGFloat(double)
+            }
+            return 0
+        }
+
+        let scrollWidth = max(
+            number("scrollWidth"),
+            number("bodyScrollWidth"),
+            number("firstElementScrollWidth"),
+            number("officeScrollRootWidth"),
+            number("maxElementScrollWidth")
+        )
+        let clientWidth = max(number("officeScrollRootClientWidth"), number("clientWidth"), 1)
+        let maxHorizontalRange = number("maxHorizontalRange")
+        officeHasHorizontalDOMScrollRange = maxHorizontalRange > 1
+        let tag = object["horizontalScrollerTag"] as? String ?? ""
+        DebugLogger.shared.log(String(format: "Office DOM horizontal range=%@ scrollWidth=%.1f clientWidth=%.1f maxRange=%.1f node=%@", officeHasHorizontalDOMScrollRange ? "true" : "false", Double(scrollWidth), Double(clientWidth), Double(maxHorizontalRange), tag))
+    }
+
+    func handleOfficeHorizontalScrollWheel(_ event: NSEvent) -> Bool {
+        guard let webView = officeWebView,
+              webView.isHidden == false
+        else { return false }
+
+        let inside = eventIsInsideVisibleView(event, view: webView)
+        let horizontalIntent = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY)
+        let inBottomBand = inside && eventIsInOfficeHorizontalScrollBand(event, webView: webView)
+        guard inside else {
+            DebugLogger.shared.log(officeScrollLogMessage("handle", event: event, detail: "skip outside office webview"))
+            return false
+        }
+        guard horizontalIntent || inBottomBand else {
+            DebugLogger.shared.log(officeScrollLogMessage("handle", event: event, detail: "skip no horizontal intent or bottom band"))
+            return false
+        }
+
+        let delta = officeHorizontalScrollDelta(for: event)
+        guard abs(delta) > 0.1 else {
+            DebugLogger.shared.log(officeScrollLogMessage("handle", event: event, detail: "skip delta too small"))
+            return false
+        }
+
+        if scrollOfficeWebViewBackingScrollView(webView, deltaX: delta) {
+            return true
+        }
+
+        if officeHasHorizontalDOMScrollRange || inBottomBand {
+            DebugLogger.shared.log(officeScrollLogMessage("handle", event: event, detail: "backing scroll unavailable, trying DOM scroll"))
+            scrollOfficeWebViewDOM(webView, deltaX: delta)
+            return true
+        }
+
+        DebugLogger.shared.log(officeScrollLogMessage("handle", event: event, detail: "no horizontal range detected, passing to WKWebView"))
+        return false
+    }
+
+    func scrollOfficeWebViewDOM(_ webView: WKWebView, deltaX: CGFloat) {
+        let jsDelta = String(format: "%.4f", Double(deltaX))
+        let script = """
+        (function(delta) {
+          var root = document.scrollingElement || document.documentElement || document.body;
+          var viewportWidth = Math.max(
+            1,
+            root && root.clientWidth || 0,
+            document.documentElement && document.documentElement.clientWidth || 0,
+            window.innerWidth || 0
+          );
+          var nodes = [];
+          function add(node) {
+            if (!node || nodes.indexOf(node) >= 0) { return; }
+            nodes.push(node);
+          }
+          add(document.getElementById("peekx-office-scroll-root"));
+          add(document.getElementById("peekx-office-content-root"));
+          add(root);
+          add(document.documentElement);
+          add(document.body);
+          Array.prototype.forEach.call(document.querySelectorAll("*"), add);
+
+          var maxRange = 0;
+          var attempted = 0;
+          function isDocumentScroller(node) {
+            return node === root || node === document.documentElement || node === document.body;
+          }
+          function canScrollHorizontally(node, range) {
+            if (range <= 1) { return false; }
+            if (node && node.id === "peekx-office-scroll-root") { return true; }
+            if (isDocumentScroller(node)) { return true; }
+            var style = window.getComputedStyle(node);
+            var overflowX = style.overflowX || style.overflow || "";
+            return /^(auto|scroll|overlay)$/i.test(overflowX);
+          }
+          function scrollLeftOf(node) {
+            if (isDocumentScroller(node)) {
+              return window.scrollX || document.documentElement.scrollLeft || document.body.scrollLeft || 0;
+            }
+            return node.scrollLeft || 0;
+          }
+          function setScrollLeftOf(node, value) {
+            if (isDocumentScroller(node)) {
+              window.scrollTo(value, window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0);
+              document.documentElement.scrollLeft = value;
+              document.body.scrollLeft = value;
+              node.scrollLeft = value;
+            } else {
+              node.scrollLeft = value;
+            }
+          }
+          var candidates = [];
+          for (var i = 0; i < nodes.length; i++) {
+            var node = nodes[i];
+            if (!node) { continue; }
+            var clientWidth = Number(node.clientWidth || 0);
+            if (isDocumentScroller(node)) {
+              clientWidth = Math.max(clientWidth, viewportWidth);
+            }
+            var range = Math.max(Number(node.scrollWidth || 0) - Math.max(clientWidth, 1), 0);
+            if (canScrollHorizontally(node, range)) {
+              maxRange = Math.max(maxRange, range);
+              candidates.push({ node: node, range: range });
+            }
+          }
+          candidates.sort(function(a, b) { return b.range - a.range; });
+          if (!candidates.length) {
+            return JSON.stringify({ didScroll: false, maxHorizontalRange: maxRange, reason: "no-scrollable-range" });
+          }
+
+          for (var j = 0; j < candidates.length; j++) {
+            var candidate = candidates[j];
+            var scroller = candidate.node;
+            var before = scrollLeftOf(scroller);
+            var next = Math.max(0, Math.min(candidate.range, before + delta));
+            attempted += 1;
+            setScrollLeftOf(scroller, next);
+            var after = scrollLeftOf(scroller);
+            if (Math.abs(after - before) > 0.5 || Math.abs(next - before) <= 0.5) {
+              return JSON.stringify({
+                didScroll: Math.abs(after - before) > 0.5,
+                atEdge: Math.abs(next - before) <= 0.5,
+                before: before,
+                after: after,
+                maxHorizontalRange: maxRange,
+                attempted: attempted,
+                horizontalScrollerTag: scroller.tagName || "",
+                horizontalScrollerClass: String(scroller.className || "").slice(0, 80)
+              });
+            }
+          }
+
+          return JSON.stringify({ didScroll: false, maxHorizontalRange: maxRange, attempted: attempted, reason: "all-candidates-static" });
+        })(\(jsDelta));
+        """
+        webView.evaluateJavaScript(script) { [weak self] result, error in
+            if let error {
+                DebugLogger.shared.log("Office horizontal scroll failed: \(error.localizedDescription)")
+            } else {
+                if let string = result as? String {
+                    DebugLogger.shared.log(String(format: "Office JS horizontal scroll result=%@ delta=%.1f", string, Double(deltaX)))
+                    self?.updateOfficeDOMScrollState(from: string)
+                } else {
+                    DebugLogger.shared.log(String(format: "Office JS horizontal scroll result=%@ delta=%.1f", String(describing: result), Double(deltaX)))
+                }
+            }
+        }
+    }
+
+    func logOfficeScrollWheelEvent(_ event: NSEvent, source: String) {
+        guard let webView = officeWebView,
+              webView.isHidden == false,
+              webView.window === event.window
+        else { return }
+
+        let point = webView.convert(event.locationInWindow, from: nil)
+        let inside = webView.bounds.contains(point)
+        let bottomDistance = webView.isFlipped
+            ? webView.bounds.maxY - point.y
+            : point.y - webView.bounds.minY
+        let dx = String(format: "%.2f", Double(event.scrollingDeltaX))
+        let dy = String(format: "%.2f", Double(event.scrollingDeltaY))
+        let bottom = String(format: "%.1f", Double(bottomDistance))
+        let px = String(format: "%.1f", Double(point.x))
+        let py = String(format: "%.1f", Double(point.y))
+        DebugLogger.shared.log("[OfficeScroll \(source)] dx=\(dx) dy=\(dy) precise=\(event.hasPreciseScrollingDeltas) inside=\(inside) bottom=\(bottom) point=(\(px),\(py))")
+    }
+
+    func officeScrollLogMessage(_ source: String, event: NSEvent, detail: String) -> String {
+        let dx = String(format: "%.2f", Double(event.scrollingDeltaX))
+        let dy = String(format: "%.2f", Double(event.scrollingDeltaY))
+        return "[OfficeScroll \(source)] \(detail) dx=\(dx) dy=\(dy) precise=\(event.hasPreciseScrollingDeltas)"
+    }
+
+    func eventShouldScrollOfficeHorizontally(_ event: NSEvent, webView: WKWebView) -> Bool {
+        guard eventIsInsideVisibleView(event, view: webView) else { return false }
+
+        // 触控板横向手势在预览区域内应直接横向滚动；普通鼠标滚轮悬停在底部
+        // 横向滚动条附近时，继续把纵向滚轮转换为横向滚动。
+        if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
+            return true
+        }
+        return eventIsInOfficeHorizontalScrollBand(event, webView: webView)
+    }
+
+    func officeHorizontalScrollDelta(for event: NSEvent) -> CGFloat {
+        if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
+            return event.scrollingDeltaX
+        }
+
+        let multiplier: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 10
+        return -event.scrollingDeltaY * multiplier
+    }
+
+    func scrollOfficeWebViewBackingScrollView(_ webView: WKWebView, deltaX: CGFloat) -> Bool {
+        guard let scrollView = firstDescendantScrollView(in: webView),
+              let documentView = scrollView.documentView
+        else {
+            DebugLogger.shared.log("Office backing scroll view unavailable")
+            return false
+        }
+
+        let current = scrollView.contentView.bounds.origin
+        let maxX = max(documentView.bounds.width - scrollView.contentView.bounds.width, 0)
+        guard maxX > 0 else {
+            DebugLogger.shared.log(String(format: "Office backing scroll view has no horizontal range documentWidth=%.1f clipWidth=%.1f", Double(documentView.bounds.width), Double(scrollView.contentView.bounds.width)))
+            return false
+        }
+
+        let nextX = min(max(current.x + deltaX, 0), maxX)
+        guard abs(nextX - current.x) > 0.5 else {
+            DebugLogger.shared.log(String(format: "Office backing scroll view already at horizontal edge x=%.1f/%.1f", Double(current.x), Double(maxX)))
+            return true
+        }
+
+        scrollView.contentView.scroll(to: NSPoint(x: nextX, y: current.y))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        DebugLogger.shared.log(String(format: "Office backing scroll view horizontal delta %.1f x=%.1f/%.1f", Double(deltaX), Double(nextX), Double(maxX)))
+        return true
+    }
+
+    func firstDescendantScrollView(in view: NSView) -> NSScrollView? {
+        if let scrollView = view as? NSScrollView {
+            return scrollView
+        }
+        for subview in view.subviews {
+            if let scrollView = firstDescendantScrollView(in: subview) {
+                return scrollView
+            }
+        }
+        return nil
+    }
+
+    func eventIsInsideVisibleView(_ event: NSEvent, view targetView: NSView) -> Bool {
+        guard targetView.window === event.window,
+              !targetView.isHiddenOrHasHiddenAncestor
+        else { return false }
+
+        let point = targetView.convert(event.locationInWindow, from: nil)
+        return targetView.bounds.contains(point)
+    }
+
+    func eventIsInOfficeHorizontalScrollBand(_ event: NSEvent, webView: WKWebView) -> Bool {
+        guard eventIsInsideVisibleView(event, view: webView) else { return false }
+
+        let point = webView.convert(event.locationInWindow, from: nil)
+        let bottomDistance = webView.isFlipped
+            ? webView.bounds.maxY - point.y
+            : point.y - webView.bounds.minY
+        return bottomDistance >= -4 && bottomDistance <= 36
     }
 
     func installMouseDownLatencyMonitorIfNeeded() {
@@ -548,6 +1090,13 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         applySystemPreviewCornerStyle(to: imageContainer, backgroundColor: .windowBackgroundColor)
         previewContainerView = imageContainer
 
+        let previewMagnificationRecognizer = NSMagnificationGestureRecognizer(
+            target: self,
+            action: #selector(handlePreviewContainerMagnification(_:))
+        )
+        previewMagnificationRecognizer.delegate = self
+        imageContainer.addGestureRecognizer(previewMagnificationRecognizer)
+
         previewImageScrollView = ImagePreviewScrollView()
         previewImageView = previewImageScrollView.imageView
 
@@ -603,6 +1152,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         stack.addArrangedSubview(previewTitleLabel)
         stack.addArrangedSubview(previewInfoLabel)
         stack.addArrangedSubview(previewMessageLabel)
+        stack.setCustomSpacing(PreviewMetrics.previewDescriptionTopGap, after: imageContainer)
         stack.setCustomSpacing(4, after: previewTitleLabel)
         imageContainer.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
@@ -656,6 +1206,28 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         return nativePreviewView
     }
 
+    func ensureSingleFileNativePreviewView() -> QLPreviewView? {
+        if let singleFileNativePreviewView {
+            return singleFileNativePreviewView
+        }
+
+        guard let singleFileNativePreviewView = QLPreviewView(frame: .zero, style: .normal) else {
+            return nil
+        }
+        singleFileNativePreviewView.translatesAutoresizingMaskIntoConstraints = false
+        singleFileNativePreviewView.isHidden = true
+        applySystemPreviewCornerStyle(to: singleFileNativePreviewView, backgroundColor: .white)
+        view.addSubview(singleFileNativePreviewView)
+        NSLayoutConstraint.activate([
+            singleFileNativePreviewView.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
+            singleFileNativePreviewView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            singleFileNativePreviewView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            singleFileNativePreviewView.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16)
+        ])
+        self.singleFileNativePreviewView = singleFileNativePreviewView
+        return singleFileNativePreviewView
+    }
+
     func ensurePDFView() -> PDFView {
         if let pdfView {
             return pdfView
@@ -673,6 +1245,43 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         constrainPreviewSurface(pdfView)
         self.pdfView = pdfView
         return pdfView
+    }
+
+    func ensureOfficeWebView() -> WKWebView {
+        if let officeWebView {
+            return officeWebView
+        }
+
+        let configuration = WKWebViewConfiguration()
+        // 使用非持久化数据存储，避免 Office 预览内容被缓存
+        configuration.websiteDataStore = WKWebsiteDataStore.nonPersistent()
+        let webView = OfficePreviewWebView(frame: .zero, configuration: configuration)
+        webView.allowsMagnification = false
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        webView.isHidden = true
+        webView.navigationDelegate = self
+        webView.magnifyHandler = { [weak self] event in
+            self?.handleOfficeMagnify(event) == true
+        }
+        webView.magnificationDeltaHandler = { [weak self, weak webView] delta in
+            guard let self, let webView else { return false }
+            return self.applyOfficeMagnification(delta, to: webView)
+        }
+        webView.smartMagnifyHandler = { [weak self] event in
+            self?.handleOfficeSmartMagnify(event) == true
+        }
+        webView.scrollDiagnosticsHandler = { [weak self] event in
+            self?.logOfficeScrollWheelEvent(event, source: "webViewOverride")
+        }
+        webView.horizontalScrollHandler = { [weak self] event in
+            self?.handleOfficeHorizontalScrollWheel(event) == true
+        }
+        webView.setValue(false, forKey: "drawsBackground")
+        applySystemPreviewCornerStyle(to: webView, backgroundColor: .white)
+        previewContainerView.addSubview(webView, positioned: .below, relativeTo: previewSpinner)
+        constrainPreviewSurface(webView)
+        officeWebView = webView
+        return webView
     }
 
     func ensureMediaPlayerView() -> AVPlayerView {
@@ -704,6 +1313,12 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         pdfView?.document = nil
         pdfView?.isHidden = true
         mediaPlayerView?.isHidden = true
+        officeWebView?.stopLoading()
+        officeHasHorizontalDOMScrollRange = false
+        if let officeWebView {
+            resetOfficeWebViewZoom(officeWebView)
+        }
+        officeWebView?.isHidden = true
         textScrollView.isHidden = true
         previewImageView.isHidden = true
         previewImageView.image = nil
@@ -740,6 +1355,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         if nativePreviewView?.isHidden == false { return true }
         if pdfView?.isHidden == false { return true }
         if mediaPlayerView?.isHidden == false { return true }
+        if officeWebView?.isHidden == false { return true }
         return false
     }
 
@@ -759,6 +1375,8 @@ final class PreviewViewController: NSViewController, QLPreviewingController, NSS
         mainStack.isHidden = enabled
         if !enabled {
             singleFileScrollView.isHidden = true
+            singleFileNativePreviewView?.isHidden = true
+            singleFileNativePreviewView?.previewItem = nil
         }
     }
 
@@ -1228,6 +1846,35 @@ extension PreviewViewController: QLPreviewPanelDataSource, QLPreviewPanelDelegat
     }
 }
 
+// MARK: - Office Web 预览诊断
+
+extension PreviewViewController: WKNavigationDelegate {
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard webView === officeWebView else { return }
+
+        // HTML 加载完成后扫描整个 DOM，记录是否存在横向滚动范围。
+        // Office 导出的布局脚本可能在 load/resize 后继续改宽度，所以延迟再扫一次。
+        refreshOfficeDOMScrollState(reason: "didFinish")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self, weak webView] in
+            guard let self,
+                  let webView,
+                  webView === self.officeWebView,
+                  webView.isHidden == false else { return }
+            self.refreshOfficeDOMScrollState(reason: "postLayout")
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        guard webView === officeWebView else { return }
+        DebugLogger.shared.log("Office WebView navigation failed: \(error.localizedDescription)")
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        guard webView === officeWebView else { return }
+        DebugLogger.shared.log("Office WebView provisional navigation failed: \(error.localizedDescription)")
+    }
+}
+
 // MARK: - 大纲列表键盘代理
 
 extension PreviewViewController: FinderOutlineViewKeyboardDelegate {
@@ -1247,5 +1894,15 @@ extension PreviewViewController: FinderOutlineViewKeyboardDelegate {
         default:
             return false
         }
+    }
+}
+
+// MARK: - 手势代理
+
+extension PreviewViewController: NSGestureRecognizerDelegate {
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: NSGestureRecognizer) -> Bool {
+        // 右侧预览里的 WKWebView、滚动视图和图片视图都有自己的事件处理；
+        // 允许同时识别，避免触控板缩放只被内部子视图吃掉。
+        true
     }
 }

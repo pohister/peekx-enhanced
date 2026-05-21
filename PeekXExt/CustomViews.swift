@@ -2,6 +2,7 @@
 // Copyright © 2025 ALTIC. All rights reserved.
 
 import Cocoa
+import WebKit
 
 enum EventLatency {
     static func uptimeEventAgeMilliseconds(for event: NSEvent) -> TimeInterval {
@@ -117,6 +118,25 @@ class FinderScrollView: NSScrollView {
         horizontalScroller?.alphaValue = 0.58
     }
 
+    override func scrollWheel(with event: NSEvent) {
+        if shouldRouteWheelToHorizontalScroll(event),
+           FinderScrollView.scrollHorizontally(self, with: event) {
+            return
+        }
+        super.scrollWheel(with: event)
+    }
+
+    func shouldRouteWheelToHorizontalScroll(_ event: NSEvent) -> Bool {
+        guard hasHorizontalScroller,
+              abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX)
+        else { return false }
+
+        let point = convert(event.locationInWindow, from: nil)
+        let overScroller = horizontalScroller?.frame.contains(point) == true
+        let inBottomBand = point.y >= -2 && point.y <= contentView.frame.minY + 28
+        return overScroller || inBottomBand
+    }
+
     static func scrollHorizontally(_ scrollView: NSScrollView, with event: NSEvent) -> Bool {
         let verticalDelta = event.scrollingDeltaY
         guard abs(verticalDelta) > abs(event.scrollingDeltaX) else {
@@ -135,6 +155,72 @@ class FinderScrollView: NSScrollView {
     }
 }
 
+// MARK: - Office Web 预览视图
+
+final class OfficePreviewWebView: WKWebView, NSGestureRecognizerDelegate {
+    var magnifyHandler: ((NSEvent) -> Bool)?
+    var smartMagnifyHandler: ((NSEvent) -> Bool)?
+    var magnificationDeltaHandler: ((CGFloat) -> Bool)?
+    var horizontalScrollHandler: ((NSEvent) -> Bool)?
+    var scrollDiagnosticsHandler: ((NSEvent) -> Void)?
+    private var lastGestureMagnification: CGFloat = 0
+
+    override init(frame: NSRect, configuration: WKWebViewConfiguration) {
+        super.init(frame: frame, configuration: configuration)
+        installMagnificationRecognizer()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        installMagnificationRecognizer()
+    }
+
+    private func installMagnificationRecognizer() {
+        let recognizer = NSMagnificationGestureRecognizer(target: self, action: #selector(handleMagnificationGesture(_:)))
+        recognizer.delegate = self
+        addGestureRecognizer(recognizer)
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: NSGestureRecognizer) -> Bool {
+        true
+    }
+
+    @objc private func handleMagnificationGesture(_ recognizer: NSMagnificationGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            lastGestureMagnification = recognizer.magnification
+        case .changed:
+            let delta = recognizer.magnification - lastGestureMagnification
+            lastGestureMagnification = recognizer.magnification
+            _ = magnificationDeltaHandler?(delta)
+        default:
+            lastGestureMagnification = 0
+        }
+    }
+
+    override func magnify(with event: NSEvent) {
+        if magnifyHandler?(event) == true {
+            return
+        }
+        super.magnify(with: event)
+    }
+
+    override func smartMagnify(with event: NSEvent) {
+        if smartMagnifyHandler?(event) == true {
+            return
+        }
+        super.smartMagnify(with: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        scrollDiagnosticsHandler?(event)
+        if horizontalScrollHandler?(event) == true {
+            return
+        }
+        super.scrollWheel(with: event)
+    }
+}
+
 // MARK: - 图片预览视图
 
 final class ImagePreviewView: NSImageView {
@@ -146,13 +232,20 @@ final class ImagePreviewView: NSImageView {
     }
 
     var renderMode: RenderMode = .orientationFill {
-        didSet { updateLayout(resetScroll: true) }
+        didSet {
+            resetUserZoom()
+            updateLayout(resetScroll: true)
+        }
     }
 
+    private var userZoom: CGFloat = 1
     private var drawRect: NSRect = .zero
 
     override var image: NSImage? {
-        didSet { updateLayout(resetScroll: true) }
+        didSet {
+            resetUserZoom()
+            updateLayout(resetScroll: true)
+        }
     }
 
     override init(frame frameRect: NSRect) {
@@ -201,17 +294,18 @@ final class ImagePreviewView: NSImageView {
         }
 
         let imageSize = image.size
-        let scale: CGFloat
+        let baseScale: CGFloat
         switch renderMode {
         case .centeredIcon:
-            scale = min(1, min(viewportSize.width / imageSize.width, viewportSize.height / imageSize.height))
+            baseScale = min(1, min(viewportSize.width / imageSize.width, viewportSize.height / imageSize.height))
         case .fit:
-            scale = min(viewportSize.width / imageSize.width, viewportSize.height / imageSize.height)
+            baseScale = min(viewportSize.width / imageSize.width, viewportSize.height / imageSize.height)
         case .orientationFill:
-            scale = imageSize.height > imageSize.width
+            baseScale = imageSize.height > imageSize.width
                 ? viewportSize.height / imageSize.height
                 : viewportSize.width / imageSize.width
         }
+        let scale = baseScale * userZoom
 
         let drawSize = NSSize(width: imageSize.width * scale, height: imageSize.height * scale)
         let documentSize = NSSize(width: max(drawSize.width, viewportSize.width), height: max(drawSize.height, viewportSize.height))
@@ -245,6 +339,31 @@ final class ImagePreviewView: NSImageView {
         needsDisplay = true
     }
 
+    func applyMagnification(_ magnification: CGFloat) -> Bool {
+        guard image != nil else { return false }
+
+        let factor = max(0.2, 1 + magnification)
+        let nextZoom = min(max(userZoom * factor, PreviewMetrics.imageZoomMinimum), PreviewMetrics.imageZoomMaximum)
+        guard abs(nextZoom - userZoom) > 0.001 else { return true }
+
+        userZoom = nextZoom
+        updateLayout(resetScroll: false)
+        DebugLogger.shared.log(String(format: "Image preview zoom changed to %.2f", nextZoom))
+        return true
+    }
+
+    func toggleSmartZoom() -> Bool {
+        guard image != nil else { return false }
+        userZoom = userZoom > 1.05 ? 1 : min(2, PreviewMetrics.imageZoomMaximum)
+        updateLayout(resetScroll: false)
+        DebugLogger.shared.log(String(format: "Image preview smart zoom changed to %.2f", userZoom))
+        return true
+    }
+
+    private func resetUserZoom() {
+        userZoom = 1
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard let image else {
             super.draw(dirtyRect)
@@ -269,8 +388,9 @@ final class ImagePreviewView: NSImageView {
 
 // MARK: - 图片预览滚动视图
 
-final class ImagePreviewScrollView: FinderScrollView {
+final class ImagePreviewScrollView: FinderScrollView, NSGestureRecognizerDelegate {
     let imageView = ImagePreviewView(frame: .zero)
+    private var lastGestureMagnification: CGFloat = 0
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -294,11 +414,45 @@ final class ImagePreviewScrollView: FinderScrollView {
         verticalScrollElasticity = .allowed
         horizontalScrollElasticity = .allowed
         documentView = imageView
+        let recognizer = NSMagnificationGestureRecognizer(target: self, action: #selector(handleMagnificationGesture(_:)))
+        recognizer.delegate = self
+        addGestureRecognizer(recognizer)
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: NSGestureRecognizer) -> Bool {
+        true
     }
 
     override func layout() {
         super.layout()
         imageView.updateLayout(resetScroll: false)
+    }
+
+    override func magnify(with event: NSEvent) {
+        if imageView.applyMagnification(event.magnification) {
+            return
+        }
+        super.magnify(with: event)
+    }
+
+    @objc private func handleMagnificationGesture(_ recognizer: NSMagnificationGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            lastGestureMagnification = recognizer.magnification
+        case .changed:
+            let delta = recognizer.magnification - lastGestureMagnification
+            lastGestureMagnification = recognizer.magnification
+            _ = imageView.applyMagnification(delta)
+        default:
+            lastGestureMagnification = 0
+        }
+    }
+
+    override func smartMagnify(with event: NSEvent) {
+        if imageView.toggleSmartZoom() {
+            return
+        }
+        super.smartMagnify(with: event)
     }
 }
 
@@ -307,7 +461,12 @@ final class ImagePreviewScrollView: FinderScrollView {
 enum PreviewMetrics {
     static let cornerRadius: CGFloat = 12
     static let dividerContentGap: CGFloat = 28
+    static let previewDescriptionTopGap: CGFloat = 22
     static let selectionPreviewDelay: TimeInterval = 0.12
     static let pointerInteractionPriorityWindow: TimeInterval = 0.18
     static let previewSurfaceUpdateDelay: TimeInterval = 0.025
+    static let officeZoomMinimum: CGFloat = 0.5
+    static let officeZoomMaximum: CGFloat = 4.0
+    static let imageZoomMinimum: CGFloat = 0.25
+    static let imageZoomMaximum: CGFloat = 8.0
 }

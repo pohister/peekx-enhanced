@@ -133,6 +133,16 @@ final class LibarchiveArchiveProvider: ArchiveProvider {
             throw ArchiveProviderError.unsupportedArchive(url)
         }
 
+        return try readListing(of: url)
+    }
+
+    func listContainerContents(of url: URL) throws -> ArchiveListing {
+        // OOXML 文档（docx/xlsx/pptx）本质也是 ZIP 容器，但不能注册为“压缩包预览”。
+        // 这个内部入口只给 Office 文本提取使用，跳过 canOpen 后缀判断，避免左侧把 Office 当压缩包展开。
+        try readListing(of: url)
+    }
+
+    private func readListing(of url: URL) throws -> ArchiveListing {
         guard let archive = archive_read_new() else {
             throw ArchiveProviderError.couldNotCreateReader
         }

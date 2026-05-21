@@ -24,6 +24,8 @@ struct PeekXApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
+    private var officePreviewScanTimer: Timer?
+    private var officePreviewRequestsInProgress = Set<String>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 只作为菜单栏应用运行，不在 Dock 中显示图标。
@@ -31,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         requestNotificationPermission()
         checkAndRefreshExtensionIfNeeded()
+        startOfficePreviewHelper()
 
         // 创建菜单栏按钮，点击后打开设置窗口。
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -149,6 +152,179 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 trigger: nil
             )
             center.add(request) { _ in }
+        }
+    }
+
+    // MARK: - Office 原生预览 helper
+
+    private func startOfficePreviewHelper() {
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(handleOfficePreviewRequest(_:)),
+            name: Notification.Name("com.pohister.PeekX.officePreviewRequest"),
+            object: nil
+        )
+
+        officePreviewScanTimer?.invalidate()
+        officePreviewScanTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            self?.scanOfficePreviewRequests()
+        }
+    }
+
+    @objc private func handleOfficePreviewRequest(_ notification: Notification) {
+        guard let requestPath = notification.userInfo?["requestPath"] as? String else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.processOfficePreviewRequest(requestPath: requestPath)
+        }
+    }
+
+    private func scanOfficePreviewRequests() {
+        let rootURL = FileManager.default
+            .homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Containers/com.pohister.PeekX.PeekXExt/Data/tmp/PeekXArchivePreviews", isDirectory: true)
+
+        guard FileManager.default.fileExists(atPath: rootURL.path),
+              let enumerator = FileManager.default.enumerator(
+                at: rootURL,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+              )
+        else { return }
+
+        while let url = enumerator.nextObject() as? URL {
+            guard url.lastPathComponent == "request.json" else { continue }
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            guard Date().timeIntervalSince(modified) < 60 else { continue }
+
+            let requestPath = url.path
+            let responsePath = url.deletingLastPathComponent().appendingPathComponent("response.json").path
+
+            guard !FileManager.default.fileExists(atPath: responsePath),
+                  !officePreviewRequestsInProgress.contains(requestPath)
+            else { continue }
+
+            officePreviewRequestsInProgress.insert(requestPath)
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.processOfficePreviewRequest(requestPath: requestPath)
+                DispatchQueue.main.async {
+                    self.officePreviewRequestsInProgress.remove(requestPath)
+                }
+            }
+        }
+    }
+
+    private func processOfficePreviewRequest(requestPath: String) {
+        let requestURL = URL(fileURLWithPath: requestPath)
+        var responseURL: URL?
+        var requestID = UUID().uuidString
+
+        do {
+            let requestData = try Data(contentsOf: requestURL)
+            let request = try JSONDecoder().decode(OfficePreviewHelperRequest.self, from: requestData)
+            requestID = request.requestID
+            responseURL = URL(fileURLWithPath: request.responsePath)
+
+            let htmlURL = try exportOfficePreviewHTML(inputPath: request.inputPath, outputPath: request.outputPath)
+            let response = OfficePreviewHelperResponse(
+                requestID: request.requestID,
+                status: "ok",
+                htmlPath: htmlURL.path,
+                error: nil
+            )
+            try JSONEncoder().encode(response).write(to: URL(fileURLWithPath: request.responsePath), options: .atomic)
+        } catch {
+            guard let responseURL else { return }
+            let response = OfficePreviewHelperResponse(
+                requestID: requestID,
+                status: "error",
+                htmlPath: nil,
+                error: error.localizedDescription
+            )
+            try? JSONEncoder().encode(response).write(to: responseURL, options: .atomic)
+        }
+    }
+
+    private func exportOfficePreviewHTML(inputPath: String, outputPath: String) throws -> URL {
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: outputPath, isDirectory: true),
+            withIntermediateDirectories: true
+        )
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/qlmanage")
+        process.arguments = ["-p", "-o", outputPath, inputPath]
+
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+
+        let semaphore = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in
+            semaphore.signal()
+        }
+
+        try process.run()
+        guard semaphore.wait(timeout: .now() + 12) == .success else {
+            process.terminate()
+            throw OfficePreviewHelperError.timedOut
+        }
+
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: outputData, encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 else {
+            throw OfficePreviewHelperError.exportFailed(output.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        guard let htmlURL = findPreviewHTML(in: URL(fileURLWithPath: outputPath, isDirectory: true)) else {
+            throw OfficePreviewHelperError.missingHTML
+        }
+        return htmlURL
+    }
+
+    private func findPreviewHTML(in directory: URL) -> URL? {
+        let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )
+
+        while let url = enumerator?.nextObject() as? URL {
+            if url.lastPathComponent == "Preview.html" {
+                return url
+            }
+        }
+        return nil
+    }
+}
+
+private struct OfficePreviewHelperRequest: Codable {
+    let requestID: String
+    let inputPath: String
+    let outputPath: String
+    let responsePath: String
+}
+
+private struct OfficePreviewHelperResponse: Codable {
+    let requestID: String
+    let status: String
+    let htmlPath: String?
+    let error: String?
+}
+
+private enum OfficePreviewHelperError: LocalizedError {
+    case timedOut
+    case missingHTML
+    case exportFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .timedOut:
+            return "Office Quick Look export timed out."
+        case .missingHTML:
+            return "Office Quick Look did not produce Preview.html."
+        case .exportFailed(let message):
+            return "Office Quick Look export failed: \(message)"
         }
     }
 }

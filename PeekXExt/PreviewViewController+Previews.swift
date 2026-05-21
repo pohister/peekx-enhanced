@@ -9,6 +9,7 @@ import QuickLookThumbnailing
 import ImageIO
 import PDFKit
 import AVKit
+import WebKit
 // MARK: - 预览加载入口
 
 extension PreviewViewController {
@@ -395,12 +396,19 @@ extension PreviewViewController {
 
     func prepareSingleFilePreview(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
         DebugLogger.shared.log("Detected single file: \(url.lastPathComponent)")
-        let isMarkdown = isMarkdownFile(url: url, contentType: UTType(filenameExtension: url.pathExtension))
+        let contentType = UTType(filenameExtension: url.pathExtension)
+        let isMarkdown = isMarkdownFile(url: url, contentType: contentType)
+        let shouldRenderText = shouldRenderAsText(url: url, contentType: contentType)
+        let shouldUseNative = shouldUseEmbeddedNativePreview(url: url, contentType: contentType)
 
         DispatchQueue.main.async {
             handler(nil)
             if isMarkdown {
                 self.showSingleFileMarkdownPreview(url: url)
+            } else if shouldUseNative {
+                self.showSingleFileNativePreview(url: url)
+            } else if shouldRenderText {
+                self.showSingleFileTextPreview(url: url)
             } else {
                 self.showSingleFileTextPreview(url: url)
             }
@@ -594,16 +602,17 @@ extension PreviewViewController {
     func showNativePreview(url: URL, title: String, contentType: UTType? = nil, requestID: UUID) {
         guard requestID == previewRequestID else { return }
         let type = contentType ?? UTType(filenameExtension: url.pathExtension)
+        DebugLogger.shared.log("showNativePreview route title=\(title) ext=\(url.pathExtension) type=\(type?.identifier ?? "nil")")
 
-        // Markdown、DOCX、图片、PDF、音视频等格式有自定义路径；
+        // Markdown、Office、图片、PDF、音视频等格式有自定义路径；
         // 其他支持格式再交给嵌入式 QLPreviewView 或缩略图兜底。
         if isMarkdownFile(url: url, contentType: type), let item = previewedItem {
             showMarkdownPreview(url: url, item: item, requestID: requestID)
             return
         }
 
-        if isDOCXFile(url: url, contentType: type) {
-            showDOCXPreview(url: url, requestID: requestID)
+        if let officeKind = OfficeDocumentPreviewKind(url: url, contentType: type) {
+            showOfficeDocumentPreview(url: url, kind: officeKind, requestID: requestID)
             return
         }
 
@@ -628,7 +637,11 @@ extension PreviewViewController {
         }
 
         if shouldUseEmbeddedNativePreview(url: url, contentType: type) {
-            showEmbeddedQuickLookPreview(url: url, title: title, requestID: requestID)
+            if shouldUseReadableCopyForEmbeddedNativePreview(url: url, contentType: type) {
+                showEmbeddedQuickLookPreviewWithReadableCopy(url: url, title: title, requestID: requestID)
+            } else {
+                showEmbeddedQuickLookPreview(url: url, title: title, requestID: requestID)
+            }
             return
         }
 
@@ -882,6 +895,9 @@ extension PreviewViewController {
         try Self.coordinatedRead(from: url) { readableURL in
             try FileManager.default.copyItem(at: readableURL, to: destinationURL)
         }
+        let attributes = try FileManager.default.attributesOfItem(atPath: destinationURL.path)
+        let copiedSize = attributes[.size] as? NSNumber
+        DebugLogger.shared.log("makeReadablePreviewCopy returned path=\(destinationURL.path) size=\(copiedSize?.int64Value ?? -1)")
         return destinationURL
     }
 
@@ -959,7 +975,175 @@ extension PreviewViewController {
         DispatchQueue.global(qos: .userInitiated).async(execute: workItem)
     }
 
+    // MARK: - Office OOXML 预览
+
+    func showOfficeDocumentPreview(url: URL, kind: OfficeDocumentPreviewKind, requestID: UUID) {
+        guard requestID == previewRequestID, let item = previewedItem else { return }
+
+        activeInlinePreviewRequestID = requestID
+        prepareLoadingPreview(for: item, message: "Loading native Office preview...")
+        schedulePreviewTimeout(
+            for: item,
+            requestID: requestID,
+            seconds: 6,
+            message: "Native Office preview is taking longer than expected."
+        )
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+
+            let previewResult = Result<URL, Error> {
+                let readableURL = try self.makeReadablePreviewCopy(of: url)
+                return try OfficeQuickLookHTMLExporter().exportPreviewHTML(
+                    for: readableURL,
+                    kind: kind,
+                    workingDirectory: self.extractedPreviewDirectory
+                )
+            }
+
+            DispatchQueue.main.async {
+                guard self.previewRequestID == requestID,
+                      self.previewedItem === item,
+                      self.activeInlinePreviewRequestID == requestID else { return }
+
+                switch previewResult {
+                case .success(let htmlURL):
+                    self.enqueuePreviewSurfaceUpdate(label: "Office Quick Look HTML", requestID: requestID, item: item) { controller in
+                        guard controller.activeInlinePreviewRequestID == requestID else { return }
+                        controller.previewTimeoutWorkItem?.cancel()
+                        controller.previewTimeoutWorkItem = nil
+                        controller.activeInlinePreviewRequestID = nil
+                        controller.previewSpinner.stopAnimation(nil)
+                        controller.hidePreviewSurfaces()
+                        let webView = controller.ensureOfficeWebView()
+                        controller.prepareOfficeWebViewForDocumentLoad(webView)
+                        webView.isHidden = false
+                        webView.loadFileURL(htmlURL, allowingReadAccessTo: htmlURL.deletingLastPathComponent())
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak controller, weak webView] in
+                            guard let controller,
+                                  let webView,
+                                  controller.previewRequestID == requestID,
+                                  controller.previewedItem === item else { return }
+                            webView.evaluateJavaScript("window.scrollTo(0, 0); var r=document.getElementById('peekx-office-scroll-root'); if(r){ r.scrollLeft=0; r.scrollTop=0; } document.scrollingElement && (document.scrollingElement.scrollLeft = 0); document.documentElement && (document.documentElement.scrollLeft = 0); document.body && (document.body.scrollLeft = 0);") { _, _ in
+                                controller.refreshOfficeDOMScrollState(reason: "initialOffsetReset")
+                            }
+                        }
+                        controller.previewMessageLabel.isHidden = true
+                        controller.previewImageLoadTask = nil
+                    }
+                case .failure(let error):
+                    DebugLogger.shared.log("Office native Quick Look HTML export failed for \(item.name): \(error.localizedDescription)")
+                    switch kind {
+                    case .docx:
+                        self.showDOCXPreview(url: url, requestID: requestID)
+                    case .ppt:
+                        self.showEmbeddedQuickLookPreviewWithReadableCopy(url: url, title: item.name, requestID: requestID)
+                    case .pptx, .xlsx:
+                        self.showOfficeTextFallback(url: url, kind: kind, requestID: requestID, item: item, nativeError: error)
+                    }
+                }
+            }
+        }
+
+        previewImageLoadTask = workItem
+        DispatchQueue.global(qos: .userInitiated).async(execute: workItem)
+    }
+
+    func showOfficeTextFallback(url: URL, kind: OfficeDocumentPreviewKind, requestID: UUID, item: FileItem, nativeError: Error) {
+        let fallbackWorkItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+
+            let textResult = Result<String, Error> {
+                let readableURL = try self.makeReadablePreviewCopy(of: url)
+                let text = try OfficeDocumentTextExtractor().extractPreview(from: readableURL, kind: kind)
+                DebugLogger.shared.log("Office OOXML text fallback extracted \(text.count) characters for \(item.name)")
+                return text
+            }
+
+            DispatchQueue.main.async {
+                guard self.previewRequestID == requestID,
+                      self.previewedItem === item,
+                      self.activeInlinePreviewRequestID == requestID else { return }
+
+                self.enqueuePreviewSurfaceUpdate(label: "Office text fallback", requestID: requestID, item: item) { controller in
+                    guard controller.activeInlinePreviewRequestID == requestID else { return }
+                    controller.previewTimeoutWorkItem?.cancel()
+                    controller.previewTimeoutWorkItem = nil
+                    controller.activeInlinePreviewRequestID = nil
+                    controller.previewSpinner.stopAnimation(nil)
+                    controller.hidePreviewSurfaces()
+                    switch textResult {
+                    case .success(let text):
+                        controller.textScrollView.isHidden = false
+                        MarkdownRenderer.setTextPreview(text.isEmpty ? "No readable content found in this document." : text, in: controller.textView, markdown: false, fontSize: 12)
+                        controller.previewMessageLabel.stringValue = "Native Office preview failed: \(nativeError.localizedDescription)"
+                        controller.previewMessageLabel.isHidden = false
+                    case .failure(let fallbackError):
+                        controller.showFallbackIcon(for: item, message: "Native Office preview failed: \(nativeError.localizedDescription)\nText fallback failed: \(fallbackError.localizedDescription)")
+                    }
+                    controller.previewImageLoadTask = nil
+                }
+            }
+        }
+
+        previewImageLoadTask = fallbackWorkItem
+        DispatchQueue.global(qos: .utility).async(execute: fallbackWorkItem)
+    }
+
     // MARK: - 嵌入式系统预览与缩略图
+
+    func showEmbeddedQuickLookPreviewWithReadableCopy(url: URL, title: String, requestID: UUID) {
+        guard requestID == previewRequestID, let item = previewedItem else { return }
+
+        activeInlinePreviewRequestID = requestID
+        prepareLoadingPreview(for: item, message: "Loading preview...")
+        schedulePreviewTimeout(
+            for: item,
+            requestID: requestID,
+            seconds: 4,
+            message: "Native preview is taking longer than expected."
+        )
+
+        let cacheKey = "native-copy:\(url.path)"
+        if let cachedURL = extractedPreviewCache[cacheKey],
+           FileManager.default.fileExists(atPath: cachedURL.path) {
+            let size = (try? FileManager.default.attributesOfItem(atPath: cachedURL.path)[.size] as? NSNumber)?.int64Value ?? -1
+            DebugLogger.shared.log("Embedded native preview using cached copy for \(title), path=\(cachedURL.path), size=\(size)")
+            showEmbeddedQuickLookPreview(url: cachedURL, title: title, requestID: requestID)
+            return
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+
+            let copyResult = Result<URL, Error> {
+                try self.makeReadablePreviewCopy(of: url)
+            }
+
+            DispatchQueue.main.async {
+                guard self.previewRequestID == requestID,
+                      self.previewedItem === item,
+                      self.activeInlinePreviewRequestID == requestID else { return }
+
+                switch copyResult {
+                case .success(let readableURL):
+                    self.extractedPreviewCache[cacheKey] = readableURL
+                    let exists = FileManager.default.fileExists(atPath: readableURL.path)
+                    let type = (try? readableURL.resourceValues(forKeys: [.contentTypeKey]).contentType)?.identifier ?? "nil"
+                    let size = (try? FileManager.default.attributesOfItem(atPath: readableURL.path)[.size] as? NSNumber)?.int64Value ?? -1
+                    DebugLogger.shared.log("Embedded native preview copied \(title) to \(readableURL.path), exists=\(exists), size=\(size), type=\(type)")
+                    self.showEmbeddedQuickLookPreview(url: readableURL, title: title, requestID: requestID)
+                case .failure(let error):
+                    self.previewTimeoutWorkItem?.cancel()
+                    self.previewTimeoutWorkItem = nil
+                    DebugLogger.shared.log("Embedded native preview copy failed for \(title): \(error.localizedDescription)")
+                    self.showEmbeddedQuickLookPreview(url: url, title: title, requestID: requestID)
+                }
+            }
+        }
+        previewImageLoadTask = workItem
+        DispatchQueue.global(qos: .userInitiated).async(execute: workItem)
+    }
 
     func showEmbeddedQuickLookPreview(url: URL, title: String, requestID: UUID) {
         guard requestID == previewRequestID, let item = previewedItem else { return }
@@ -976,10 +1160,13 @@ extension PreviewViewController {
                 return
             }
             DebugLogger.shared.log("Embedded native preview requested for \(title)")
+            controller.previewTimeoutWorkItem?.cancel()
+            controller.previewTimeoutWorkItem = nil
             controller.hidePreviewSurfaces(clearNativePreview: false)
             previewView.previewItem = previewItem
             previewView.isHidden = false
             previewView.refreshPreviewItem()
+            controller.logEmbeddedPreviewState(previewView, title: title, phase: "after refreshPreviewItem")
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak controller, weak item] in
                 guard let controller,
@@ -990,7 +1177,43 @@ extension PreviewViewController {
                 controller.previewSpinner.stopAnimation(nil)
                 controller.previewMessageLabel.isHidden = true
             }
+            controller.scheduleEmbeddedPreviewDiagnostics(previewView, title: title, requestID: requestID, item: item)
         }
+    }
+
+    func scheduleEmbeddedPreviewDiagnostics(_ previewView: QLPreviewView, title: String, requestID: UUID, item: FileItem) {
+        for delay in [0.3, 1.0, 2.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak previewView, weak item] in
+                guard let self,
+                      let previewView,
+                      let item,
+                      self.previewRequestID == requestID,
+                      self.previewedItem === item else { return }
+                self.logEmbeddedPreviewState(previewView, title: title, phase: String(format: "after %.1fs", delay))
+            }
+        }
+    }
+
+    func logEmbeddedPreviewState(_ previewView: QLPreviewView, title: String, phase: String) {
+        let itemURL = previewView.previewItem?.previewItemURL?.path ?? "nil"
+        let itemTitle = previewView.previewItem?.previewItemTitle.map { String($0) } ?? "nil"
+        let tree = describeViewTree(previewView, maxDepth: 3)
+        DebugLogger.shared.log(
+            "Embedded native preview state [\(phase)] title=\(title) hidden=\(previewView.isHidden) frame=\(NSStringFromRect(previewView.frame)) previewItemTitle=\(itemTitle) previewItemURL=\(itemURL) subviews=\(tree)"
+        )
+    }
+
+    func describeViewTree(_ view: NSView, maxDepth: Int, depth: Int = 0) -> String {
+        let indent = String(repeating: ">", count: depth)
+        let selfDescription = "\(indent)\(type(of: view)){hidden=\(view.isHidden), frame=\(NSStringFromRect(view.frame)), subviews=\(view.subviews.count)}"
+        guard maxDepth > 0, !view.subviews.isEmpty else {
+            return selfDescription
+        }
+        let childDescriptions = view.subviews
+            .prefix(8)
+            .map { describeViewTree($0, maxDepth: maxDepth - 1, depth: depth + 1) }
+            .joined(separator: " | ")
+        return "\(selfDescription) | \(childDescriptions)"
     }
 
     func showQuickLookThumbnailPreview(url: URL, title: String, requestID: UUID) {
@@ -1108,12 +1331,6 @@ extension PreviewViewController {
             || contentType?.identifier == "net.daringfireball.markdown"
     }
 
-    func isDOCXFile(url: URL, contentType: UTType?) -> Bool {
-        let ext = url.pathExtension.lowercased()
-        return ext == "docx"
-            || contentType?.identifier == "org.openxmlformats.wordprocessingml.document"
-    }
-
     func shouldUseMediaPlayerPreview(url: URL, contentType: UTType?) -> Bool {
         let ext = url.pathExtension.lowercased()
         let mediaExtensions: Set<String> = [
@@ -1134,6 +1351,16 @@ extension PreviewViewController {
             "doc", "key", "numbers", "pages", "ppt", "pptx", "xls", "xlsx"
         ]
         if nativePreviewExtensions.contains(ext) {
+            return true
+        }
+
+        return contentType?.conforms(to: .presentation) == true
+            || contentType?.conforms(to: .spreadsheet) == true
+    }
+
+    func shouldUseReadableCopyForEmbeddedNativePreview(url: URL, contentType: UTType?) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        if ["ppt", "pptx", "xls", "xlsx"].contains(ext) {
             return true
         }
 
@@ -1280,6 +1507,8 @@ extension PreviewViewController {
 
     func showSingleFileTextPreview(url: URL) {
         applySingleFileLayout(true)
+        singleFileNativePreviewView?.isHidden = true
+        singleFileNativePreviewView?.previewItem = nil
         singleFileScrollView.isHidden = false
         singleFileTextView.string = ""
 
@@ -1295,6 +1524,8 @@ extension PreviewViewController {
 
     func showSingleFileMarkdownPreview(url: URL) {
         applySingleFileLayout(true)
+        singleFileNativePreviewView?.isHidden = true
+        singleFileNativePreviewView?.previewItem = nil
         singleFileScrollView.isHidden = false
         singleFileTextView.string = ""
         MarkdownRenderer.setRenderedHTMLPreview(MarkdownRenderer.markdownLoadingHTML(), in: singleFileTextView)
@@ -1306,6 +1537,20 @@ extension PreviewViewController {
             self.logMarkdownRenderResult(result, fileName: url.lastPathComponent)
             MarkdownRenderer.setRenderedHTMLPreview(result.html, in: self.singleFileTextView)
         }
+    }
+
+    func showSingleFileNativePreview(url: URL) {
+        applySingleFileLayout(true)
+        singleFileScrollView.isHidden = true
+        let previewItem = URLPreviewItem(url: url, title: url.lastPathComponent)
+        activeNativePreviewItem = previewItem
+        guard let previewView = ensureSingleFileNativePreviewView() else {
+            showSingleFileTextPreview(url: url)
+            return
+        }
+        previewView.previewItem = previewItem
+        previewView.isHidden = false
+        previewView.refreshPreviewItem()
     }
 
     // MARK: - Markdown 预览

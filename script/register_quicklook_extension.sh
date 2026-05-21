@@ -61,6 +61,7 @@ if [[ "$BUILD" -eq 1 ]]; then
       -scheme "$SCHEME" \
       -configuration "$CONFIGURATION" \
       -derivedDataPath "$DERIVED_DATA_PATH" \
+      -allowProvisioningUpdates \
       build
 fi
 
@@ -104,6 +105,24 @@ echo "Refreshing Quick Look caches"
 /usr/bin/killall QuickLookSatellite 2>/dev/null || true
 /usr/bin/qlmanage -r >/dev/null 2>&1 || true
 /usr/bin/qlmanage -r cache >/dev/null 2>&1 || true
+
+echo "Launching PeekX helper app"
+/usr/bin/pkill -x PeekX 2>/dev/null || true
+if ! /usr/bin/open -gj "$APP_PATH" 2>/dev/null; then
+  /usr/bin/open "$APP_PATH" 2>/dev/null || true
+fi
+
+sleep 0.5
+if ! /usr/bin/pgrep -f "$APP_PATH/Contents/MacOS/PeekX" >/dev/null 2>&1; then
+  /usr/bin/open "$APP_PATH" 2>/dev/null || true
+  sleep 0.5
+fi
+
+if /usr/bin/pgrep -f "$APP_PATH/Contents/MacOS/PeekX" >/dev/null 2>&1; then
+  echo "PeekX helper app is running"
+else
+  echo "Warning: PeekX helper app did not start; Office previews may fall back to text." >&2
+fi
 
 echo "Current PeekX registrations:"
 /usr/bin/pluginkit -m -A -D -v |
